@@ -29,6 +29,42 @@ const (
 	APSOptionRetry uint16 = 0x0040
 )
 
+// Request sends an application message and waits for a reply that satisfies
+// match.
+//
+// The subscription is established before the message goes out, because a
+// mains-powered device can answer faster than the send call returns.
+//
+// The caller's context bounds the wait, and choosing that bound is a real
+// decision: a sleepy device only receives while polling its parent, so a
+// request to one is not late until it has had time to wake up.
+func (c *Conn) Request(ctx context.Context, dest uint16, aps APSFrame, payload []byte, match func(IncomingMessage) bool) (IncomingMessage, error) {
+	replies, cancel := c.Subscribe(func(m Message) bool {
+		return m.Callback && m.ID == FrameIncomingMessage
+	}, 32)
+	defer cancel()
+
+	if _, err := c.SendUnicast(ctx, dest, aps, 0, payload); err != nil {
+		return IncomingMessage{}, err
+	}
+
+	for {
+		select {
+		case m, ok := <-replies:
+			if !ok {
+				return IncomingMessage{}, ErrClosed
+			}
+			msg, err := decodeIncomingMessage(m.Params)
+			if err != nil || !match(msg) {
+				continue
+			}
+			return msg, nil
+		case <-ctx.Done():
+			return IncomingMessage{}, fmt.Errorf("%w: no reply from 0x%04X on cluster 0x%04X", ErrTimeout, dest, aps.Cluster)
+		}
+	}
+}
+
 // SendUnicast sends an application message to one device.
 //
 // The returned sequence is the APS counter the stack assigned. Success here

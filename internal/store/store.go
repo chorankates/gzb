@@ -34,6 +34,53 @@ type Device struct {
 	// reports, keyed by name. Sleepy devices are unreachable most of the time,
 	// so the last thing they volunteered is often the only thing available.
 	Readings map[string]Reading `json:"readings,omitempty"`
+
+	// The remaining fields come from an interview. They describe what the
+	// device is rather than what it has reported, and they change rarely — so
+	// they are cached here and not asked for again, which for a battery device
+	// is the difference between a usable tool and a flat battery.
+	Manufacturer string     `json:"manufacturer,omitempty"`
+	Model        string     `json:"model,omitempty"`
+	PowerSource  string     `json:"power_source,omitempty"`
+	Endpoints    []Endpoint `json:"endpoints,omitempty"`
+	Interviewed  time.Time  `json:"interviewed,omitempty"`
+}
+
+// Endpoint is one endpoint discovered by an interview.
+type Endpoint struct {
+	ID      uint8    `json:"id"`
+	Profile uint16   `json:"profile"`
+	Device  uint16   `json:"device_id"`
+	Input   []uint16 `json:"input_clusters,omitempty"`
+	Output  []uint16 `json:"output_clusters,omitempty"`
+}
+
+// Describe names the device as well as what is known allows: its model if it
+// has been interviewed, otherwise its label, otherwise its address.
+func (d *Device) Describe() string {
+	switch {
+	case d.Label != "":
+		return d.Label
+	case d.Manufacturer != "" && d.Model != "":
+		return d.Manufacturer + " " + d.Model
+	case d.Model != "":
+		return d.Model
+	default:
+		return d.IEEE
+	}
+}
+
+// HasCluster reports whether any endpoint implements the given input cluster,
+// and on which endpoint.
+func (d *Device) HasCluster(cluster uint16) (uint8, bool) {
+	for _, ep := range d.Endpoints {
+		for _, in := range ep.Input {
+			if in == cluster {
+				return ep.ID, true
+			}
+		}
+	}
+	return 0, false
 }
 
 // Reading is the latest value of one quantity a device reports.

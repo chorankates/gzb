@@ -75,6 +75,8 @@ func run(args []string) error {
 		return cmdConfig(ctx, &g, rest[1:])
 	case "monitor":
 		return cmdMonitor(ctx, &g, rest[1:])
+	case "interview":
+		return cmdInterview(ctx, &g, rest[1:])
 	case "help", "-h", "--help":
 		usage(fs)
 		return nil
@@ -96,6 +98,7 @@ commands:
   permit-join <s>   open the network to new devices for s seconds, then exit
   join [s]          open the network and watch devices arrive (default 60s)
   devices           list devices in the local registry
+  interview <dev>   ask a device what it is: endpoints, clusters, model
   monitor           print device reports as they arrive
   config            dump the NCP's configuration values (diagnostic)
   help              show this message

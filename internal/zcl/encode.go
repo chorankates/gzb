@@ -20,6 +20,17 @@ func (f Frame) ReadRequest() ([]uint16, error) {
 	return ids, nil
 }
 
+// ReadAttributesRequest builds a Read Attributes command.
+func ReadAttributesRequest(seq uint8, ids []uint16) []byte {
+	// Client to server, and a default response is not wanted: a read either
+	// gets its answer or times out.
+	out := []byte{byte(fcDisableDefaultResponse), seq, CmdReadAttributes}
+	for _, id := range ids {
+		out = binary.LittleEndian.AppendUint16(out, id)
+	}
+	return out
+}
+
 // Status codes used in attribute responses.
 const (
 	StatusSuccess              uint8 = 0x00
