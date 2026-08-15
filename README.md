@@ -299,3 +299,41 @@ Not built yet:
 - Cluster commands for lights, plugs and switches
 - Binding management
 - REPL mode
+
+
+## usage
+
+```
+conor@pride:~/git/gzb[chorankates/gzb|main|3964526|U]
+ 4:07.25 [44730] $ ./gzb devices
+A4:C1:38:18:56:07:FF:FF  0x90CB
+  sleepy end device, last seen 2026-08-15T16:00:10-06:00
+  battery        100.00 %     (2026-08-15T15:55:15-06:00)
+  humidity       31.20 %      (2026-08-15T16:00:10-06:00)
+  temperature    28.20 °C     (2026-08-15T15:55:12-06:00)
+
+1 device(s) in /home/conor/.config/gzb/devices.json
+conor@pride:~/git/gzb[chorankates/gzb|main|3964526|U]
+ 4:08.33 [44732] $ ./gzb monitor
+Listening on /dev/ttyUSB0. Ctrl-C to stop.
+
+^C
+Stopped.
+conor@pride:~/git/gzb[chorankates/gzb|main|3964526|U]
+ 4:08.45 [44733] $ ./gzb monitor -raw
+Listening on /dev/ttyUSB0. Ctrl-C to stop.
+
+16:09:00  A4:C1:38:18:56:07:FF:FF  temperature     27.40 °C   lqi 255  rssi -28
+^C
+Stopped.
+conor@pride:~/git/gzb[chorankates/gzb|main|3964526|U]
+ 4:09.08 [44734] $ ./gzb devices
+A4:C1:38:18:56:07:FF:FF  0x90CB
+  sleepy end device, last seen 2026-08-15T16:09:00-06:00
+  battery        100.00 %     (2026-08-15T15:55:15-06:00)
+  humidity       31.20 %      (2026-08-15T16:00:10-06:00)
+  temperature    27.40 °C     (2026-08-15T16:09:00-06:00)
+
+1 device(s) in /home/conor/.config/gzb/devices.json
+```
+
