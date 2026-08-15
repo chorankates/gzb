@@ -31,8 +31,10 @@ never emits a `0x7E`-terminated ASH frame.
 Three layers, each independently testable:
 
 ```
-cmd/gzb            CLI: probe, network form/leave, permit-join
-  internal/ezsp    EZSP: version negotiation, commands, callbacks
+cmd/gzb            CLI: probe, network, join, monitor, devices, config
+  internal/store   device registry: identities and last known readings
+  internal/zcl     ZCL: attribute reports, readings, response encoding
+  internal/ezsp    EZSP: negotiation, commands, callbacks, endpoints
     internal/ash   ASH: framing, CRC, randomization, ACK/retransmit
       serial       115200 8N1, DTR and RTS deasserted
 ```
@@ -116,9 +118,142 @@ Network
 $ gzb network form --channel 15          # dry run; prints what it would do
 $ gzb network form --channel 15 --confirm
 $ gzb network leave --confirm
-$ gzb permit-join 60                     # open to new devices
+$ gzb permit-join 60                     # open to new devices, then exit
 $ gzb permit-join 0                      # close again
+$ gzb join 90                            # open, and watch devices arrive
+$ gzb join --verbose 90                  # ...and show every APS frame
+$ gzb devices                            # list what has been seen
+$ gzb monitor                            # print readings until Ctrl-C
+$ gzb monitor --for 60s --raw            # ...bounded, including undecoded frames
+$ gzb config                             # dump NCP configuration (diagnostic)
 ```
+
+`join` is the one to use when pairing. `permit-join` opens the window and
+exits, so a device that arrives afterwards is joined to the network but
+recorded nowhere; `join` holds the session open for the whole window, decodes
+the arrival and writes it to the local registry.
+
+## NCP state is host state
+
+The single most important thing this codebase learned the hard way:
+
+> **EZSP configuration, endpoints and policies live in NCP RAM and reset to
+> firmware defaults on every reboot — and opening the ASH link reboots it.**
+
+They are not adapter settings you write once. They are host state that must be
+re-applied on every connection, in a specific order, because most of it is
+rejected once the network is up:
+
+```
+reset ASH  →  version handshake  →  configuration  →  endpoints  →  networkInit
+                                    └──── only valid while the network is down ────┘
+```
+
+Three separate failures traced back to skipping a step here, and every one of
+them presented as total silence rather than an error.
+
+### Stack profile
+
+`EZSP_CONFIG_STACK_PROFILE` defaults to **0** on this firmware. ZigBee PRO is
+**2**, and the value ends up in the beacon. A Zigbee 3.0 device that reads a
+beacon advertising profile 0 rejects it and never attempts to associate, so the
+coordinator sees nothing at all — not a denied join, no join.
+
+Changing it invalidates a network formed under the old value, so a network
+formed before this was fixed has to be re-formed.
+
+### Endpoints
+
+Until an endpoint exists, the coordinator has no APS address a device can talk
+to. ZDO discovery finds nothing, bindings have nothing to point at, and
+attribute reports are rejected. The device joins, finds a network it cannot
+use, and leaves a few seconds later.
+
+### Trust-centre policy
+
+Two separate things must both be true before a device can join:
+
+- **`permitJoining`** opens a *time window*.
+- **The trust-centre policy** decides what happens to a device that arrives
+  during it. Without `EZSP_DECISION_ALLOW_JOINS` the NCP denies every join,
+  however wide the window.
+
+The key-request policy matters just as much. A Zigbee 3.0 device asks the trust
+centre for a link key of its own once it is on the network, and the answer
+decides whether it stays:
+
+| Decision | Result |
+| --- | --- |
+| `0x50` allow, send current key | device joins, then **leaves after ~21s** |
+| `0x51` allow, generate new key | device joins and stays |
+
+`gzb join` applies these every session and then **reads the policy back**,
+because a silently ineffective policy and a device that was never in pairing
+mode both look like "nothing joined".
+
+The stack reports the window opening and closing through `stackStatusHandler`,
+and `join` surfaces those directly:
+
+```console
+$ gzb join 20
+[   0.0s] stack         network opened for joining
+[  19.9s] stack         network closed to joining
+```
+
+Those two statuses are `0x9C` and `0x9D` on EmberZNet 7.4.4, measured on the
+wire. Seeing them is what separates "the coordinator was listening and nothing
+called" from "the window never opened".
+
+A joining device produces up to three callbacks, which are complementary
+rather than redundant:
+
+| Callback | Fires for | Uniquely carries |
+| --- | --- | --- |
+| `trustCenterJoinHandler` | any device joining anywhere in the mesh | both addresses, the join decision |
+| `childJoinHandler` | devices parented directly to the coordinator | node type |
+| ZDO Device Announce | broadcast by the device itself | MAC capability flags |
+
+Only the announce says whether a device is mains powered or a sleepy battery
+node, so the registry merges all three rather than letting the last one win.
+
+## Reading data
+
+`monitor` decodes ZCL attribute reports into named quantities with units:
+
+```console
+$ gzb monitor
+15:55:11  A4:C1:38:18:56:07:FF:FF  temperature     28.20 °C   lqi 255  rssi -25
+15:55:11  A4:C1:38:18:56:07:FF:FF  humidity        34.60 %    lqi 255  rssi -25
+15:55:15  A4:C1:38:18:56:07:FF:FF  battery        100.00 %    lqi 255  rssi -25
+```
+
+Listening is not a debugging convenience — it is the primary way to get data
+from a battery device. Sleepy nodes are unreachable most of the time and report
+when a value changes, so readings are written to the registry as they arrive:
+
+```console
+$ gzb devices
+A4:C1:38:18:56:07:FF:FF  0x90CB
+  sleepy end device, last seen 2026-08-15T16:00:10-06:00
+  battery        100.00 %     (2026-08-15T15:55:15-06:00)
+  humidity        31.20 %     (2026-08-15T16:00:10-06:00)
+  temperature     28.20 °C    (2026-08-15T15:55:12-06:00)
+```
+
+`--json` emits one object per reading, and `--raw` additionally shows frames
+that carry no interpretable attributes.
+
+### Answering the Time cluster
+
+The coordinator serves cluster `0x000A` rather than only consuming clusters.
+Devices read the time to stamp their own data, and one that gets no answer
+keeps asking — this sensor retried every two seconds, which on a battery is not
+free. Advertising the cluster and then ignoring the reads is the worst of both
+worlds, so `monitor` answers them.
+
+DST is folded into the reported timezone offset rather than modelled with
+transition times: `LocalTime` is correct, which is all devices use, without
+pretending to know future transitions.
 
 Every command takes `--json` for machine-readable output, `--trace` to log
 decoded EZSP frames, and `--trace-ash` to log the raw ASH frames beneath them.
@@ -139,16 +274,28 @@ EmberZNet 7.4.4.
 
 Working and verified against hardware:
 
+Working and verified against hardware, with a real device paired:
+
 - ASH framing, CRC, randomization, escaping, ACK and retransmission
 - EZSP version negotiation and both frame layouts
-- `probe`, `network show`, `network form`, `network leave`, `permit-join`
+- NCP configuration and endpoint registration, re-applied every session
 - Network formation and persistence across reconnects
+- Trust-centre join policy, applied and verified by read-back
+- Pairing: all three join callbacks decoded, merged and recorded
+- ZCL attribute reports decoded into readings, and the device registry
+- Outbound unicast, exercised by the Time cluster responder
+- `probe`, `network`, `permit-join`, `join`, `devices`, `monitor`, `config`
 - Raw command escape hatch (`ezsp.Conn.Call`) for any unmodelled command
+
+Verified end to end with a SONOFF temperature/humidity sensor
+(`A4:C1:38:18:56:07:FF:FF`): paired, survived reconnects, and reported
+temperature, humidity and battery. The ZCL tests are pinned to bytes that
+sensor actually sent.
 
 Not built yet:
 
-- Device discovery and the device registry
 - ZDO queries: active endpoints, simple and node descriptors
-- ZCL: attribute read/write, discovery, cluster commands
-- The friendly layer over common clusters
-- REPL and continuous monitoring
+- Reading and writing attributes on demand, and configuring reporting
+- Cluster commands for lights, plugs and switches
+- Binding management
+- REPL mode

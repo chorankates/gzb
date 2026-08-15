@@ -114,6 +114,19 @@ func Open(ctx context.Context, opts Options) (*Conn, error) {
 		c.Close()
 		return nil, err
 	}
+	// Configuration must be written here, after the version handshake and
+	// before the network comes up: the NCP reverts to its own defaults on every
+	// reboot, and most values refuse to change once the stack is running.
+	if err := c.applyConfiguration(ctx); err != nil {
+		c.Close()
+		return nil, err
+	}
+	// Endpoints have the same lifetime as configuration and the same
+	// constraint: they must be registered before the network comes up.
+	if err := c.registerEndpoints(ctx); err != nil {
+		c.Close()
+		return nil, err
+	}
 	// Resetting the ASH link resets the NCP, which comes back with its radio
 	// idle even when credentials are saved in its tokens. Restoring them is
 	// what makes an existing network survive a reconnect; it creates nothing

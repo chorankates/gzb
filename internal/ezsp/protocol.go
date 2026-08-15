@@ -80,6 +80,14 @@ func (f FrameID) String() string {
 		return "trustCenterJoinHandler"
 	case FrameChildJoinHandler:
 		return "childJoinHandler"
+	case FrameSetPolicy:
+		return "setPolicy"
+	case FrameGetPolicy:
+		return "getPolicy"
+	case FrameSetInitialSecurityState:
+		return "setInitialSecurityState"
+	case FrameGetCurrentSecurityState:
+		return "getCurrentSecurityState"
 	default:
 		return fmt.Sprintf("frame 0x%04X", uint16(f))
 	}
@@ -172,6 +180,15 @@ const (
 	StatusNetworkUp        EmberStatus = 0x90
 	StatusNetworkDown      EmberStatus = 0x91
 	StatusInvalidParameter EmberStatus = 0xB4
+	// StatusNetworkOpened and StatusNetworkClosed arrive via stackStatusHandler
+	// when the join window opens and expires. They are the stack's own
+	// confirmation that permitJoining took effect, which is worth more than the
+	// command's return status.
+	//
+	// These values were read off the wire from EmberZNet 7.4.4: opening a
+	// 30-second window produced 0x9C immediately and 0x9D at expiry.
+	StatusNetworkOpened EmberStatus = 0x9C
+	StatusNetworkClosed EmberStatus = 0x9D
 )
 
 func (s EmberStatus) String() string {
@@ -186,6 +203,10 @@ func (s EmberStatus) String() string {
 		return "network up"
 	case StatusNetworkDown:
 		return "network down"
+	case StatusNetworkOpened:
+		return "network opened for joining"
+	case StatusNetworkClosed:
+		return "network closed to joining"
 	case StatusInvalidParameter:
 		return "invalid parameter"
 	default:

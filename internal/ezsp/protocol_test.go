@@ -130,6 +130,19 @@ func TestChannelList(t *testing.T) {
 	}
 }
 
+// TestJoinWindowStatusValues pins the two stack statuses that report the join
+// window. Both were captured from EmberZNet 7.4.4: opening a 30-second window
+// produced 0x9C at once and 0x9D at expiry. They were originally guessed as
+// 0x74 and 0x75, which made a working join window look like a broken one.
+func TestJoinWindowStatusValues(t *testing.T) {
+	if StatusNetworkOpened != 0x9C {
+		t.Errorf("StatusNetworkOpened = 0x%02X, want 0x9C", uint8(StatusNetworkOpened))
+	}
+	if StatusNetworkClosed != 0x9D {
+		t.Errorf("StatusNetworkClosed = 0x%02X, want 0x9D", uint8(StatusNetworkClosed))
+	}
+}
+
 // TestNetworkStatusValues pins the EmberNetworkStatus enum down. Reading
 // "joined" as 1 rather than 2 makes a live network report itself as still
 // joining, which is how this was originally wrong.

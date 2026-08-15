@@ -67,6 +67,14 @@ func run(args []string) error {
 		return cmdNetwork(ctx, &g, rest[1:])
 	case "permit-join":
 		return cmdPermitJoin(ctx, &g, rest[1:])
+	case "join":
+		return cmdJoin(ctx, &g, rest[1:])
+	case "devices":
+		return cmdDevices(ctx, &g, rest[1:])
+	case "config":
+		return cmdConfig(ctx, &g, rest[1:])
+	case "monitor":
+		return cmdMonitor(ctx, &g, rest[1:])
 	case "help", "-h", "--help":
 		usage(fs)
 		return nil
@@ -85,7 +93,11 @@ commands:
   network show      same as probe
   network form      create a new network (destructive, needs --confirm)
   network leave     tear down the current network (destructive, needs --confirm)
-  permit-join <s>   open the network to new devices for s seconds
+  permit-join <s>   open the network to new devices for s seconds, then exit
+  join [s]          open the network and watch devices arrive (default 60s)
+  devices           list devices in the local registry
+  monitor           print device reports as they arrive
+  config            dump the NCP's configuration values (diagnostic)
   help              show this message
 
 global flags:
