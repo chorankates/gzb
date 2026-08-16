@@ -119,6 +119,51 @@ func TestDecodeRejectsTruncatedFrames(t *testing.T) {
 	}
 }
 
+func TestMatchesResponseRequiresSequenceAndID(t *testing.T) {
+	wantSeq := uint8(7)
+	wantID := FrameNetworkState
+	tests := []struct {
+		name string
+		msg  Message
+		want bool
+	}{
+		{"matching response", Message{Sequence: wantSeq, ID: wantID}, true},
+		{"stale sequence", Message{Sequence: wantSeq - 1, ID: wantID}, false},
+		{"different frame ID", Message{Sequence: wantSeq, ID: FrameVersion}, false},
+		{"callback", Message{Sequence: wantSeq, ID: wantID, Callback: true}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := matchesResponse(tt.msg, wantSeq, wantID); got != tt.want {
+				t.Errorf("matchesResponse(%v) = %t, want %t", tt.msg, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRouteCountsDroppedSubscriptionMessage(t *testing.T) {
+	c := &Conn{
+		subs: map[int]*subscription{
+			0: {match: func(Message) bool { return true }, ch: make(chan Message, 1)},
+		},
+	}
+	c.subs[0].ch <- Message{}
+
+	c.route(Message{ID: FrameNetworkState})
+
+	if got := c.droppedSubscription.Load(); got != 1 {
+		t.Fatalf("dropped subscriptions = %d, want 1", got)
+	}
+}
+
+func FuzzDecodeMessage(f *testing.F) {
+	f.Add(LegacyVersion, []byte{0x00, 0x80, 0x00, 0x0D, 0x02, 0x40, 0x74})
+	f.Add(13, []byte{0x02, 0x80, 0x01, 0x26, 0x00})
+	f.Fuzz(func(t *testing.T, version int, data []byte) {
+		_, _ = decodeMessage(version, data)
+	})
+}
+
 func TestChannelList(t *testing.T) {
 	// The default Zigbee channel mask covers 11 through 26.
 	all := ChannelList(0x07FFF800)
