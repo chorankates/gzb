@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"time"
 
@@ -44,12 +45,12 @@ const timeStatusMaster uint8 = 0x03
 // are reported as zero. That keeps LocalTime correct, which is the only thing
 // devices actually use, without pretending to know future transitions.
 func timeAttribute(id uint16, now time.Time) (zcl.Record, bool) {
-	utc := uint64(now.UTC().Sub(zigbeeEpoch) / time.Second)
+	utc := int64(now.UTC().Sub(zigbeeEpoch) / time.Second)
 	_, offsetSeconds := now.Zone()
 
 	switch id {
 	case attrTime:
-		return zcl.Record{ID: id, Type: zcl.TypeUTCTime, Value: utc}, true
+		return zcl.Record{ID: id, Type: zcl.TypeUTCTime, Value: clampZCLTime(utc)}, true
 	case attrTimeStatus:
 		return zcl.Record{ID: id, Type: zcl.TypeBitmap8, Value: uint64(timeStatusMaster)}, true
 	case attrTimeZone:
@@ -59,10 +60,20 @@ func timeAttribute(id uint16, now time.Time) (zcl.Record, bool) {
 	case attrDstShift:
 		return zcl.Record{ID: id, Type: zcl.TypeInt32, Value: int64(0)}, true
 	case attrLocalTime:
-		return zcl.Record{ID: id, Type: zcl.TypeUint32, Value: utc + uint64(offsetSeconds)}, true
+		return zcl.Record{ID: id, Type: zcl.TypeUint32, Value: clampZCLTime(utc + int64(offsetSeconds))}, true
 	default:
 		return zcl.Record{ID: id, Status: zcl.StatusUnsupportedAttribute}, false
 	}
+}
+
+func clampZCLTime(seconds int64) uint64 {
+	if seconds < 0 {
+		return 0
+	}
+	if seconds > math.MaxUint32 {
+		return math.MaxUint32
+	}
+	return uint64(seconds)
 }
 
 // serveTimeRead answers a Read Attributes on the Time cluster.

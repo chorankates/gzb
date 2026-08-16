@@ -207,6 +207,24 @@ standing invitation on the network and is best avoided.
 	}
 	defer conn.Close()
 
+	if err := setJoinWindow(ctx, conn, uint8(seconds)); err != nil {
+		return err
+	}
+	if seconds == 0 {
+		fmt.Println("Network closed to new devices.")
+		return nil
+	}
+	fmt.Printf("Network open to new devices for %d seconds.\n", seconds)
+	return nil
+}
+
+type joinWindowConn interface {
+	NetworkState(context.Context) (ezsp.NetworkStatus, error)
+	AllowJoins(context.Context) error
+	PermitJoining(context.Context, uint8) error
+}
+
+func setJoinWindow(ctx context.Context, conn joinWindowConn, seconds uint8) error {
 	state, err := conn.NetworkState(ctx)
 	if err != nil {
 		return fmt.Errorf("reading network state: %w", err)
@@ -215,14 +233,14 @@ standing invitation on the network and is best avoided.
 		return fmt.Errorf("no network on this adapter (%s); form one first", state)
 	}
 
-	if err := conn.PermitJoining(ctx, uint8(seconds)); err != nil {
+	if seconds != 0 {
+		if err := conn.AllowJoins(ctx); err != nil {
+			return fmt.Errorf("configuring trust centre to accept joins: %w", err)
+		}
+	}
+	if err := conn.PermitJoining(ctx, seconds); err != nil {
 		return err
 	}
-	if seconds == 0 {
-		fmt.Println("Network closed to new devices.")
-		return nil
-	}
-	fmt.Printf("Network open to new devices for %d seconds.\n", seconds)
 	return nil
 }
 

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -52,6 +53,30 @@ func TestObservePreservesMergedFields(t *testing.T) {
 	}
 	if d2.NodeType != "sleepy end device" {
 		t.Error("node type from the child callback was lost")
+	}
+}
+
+func TestObserveNodeIDPromotesPlaceholderOnJoin(t *testing.T) {
+	s := &Store{Devices: map[string]*Device{}}
+	now := time.Now()
+	pending, isNew := s.ObserveNodeID(0x90CB, now)
+	pending.Record("temperature", 28.2, "°C", now)
+	if !isNew || pending.Identified() {
+		t.Fatalf("placeholder = %+v, isNew = %t", pending, isNew)
+	}
+
+	joined, isNew := s.Observe("A4:C1:38:18:56:07:FF:FF", 0x90CB, now.Add(time.Minute))
+	if isNew {
+		t.Error("promoting a previously observed node must not count it twice")
+	}
+	if joined != pending || !joined.Identified() {
+		t.Fatalf("joined record = %+v, want promoted placeholder", joined)
+	}
+	if joined.Readings["temperature"].Value != 28.2 {
+		t.Error("readings collected before the join were lost")
+	}
+	if len(s.Devices) != 1 {
+		t.Fatalf("registry contains %d records, want 1", len(s.Devices))
 	}
 }
 
@@ -121,6 +146,28 @@ func TestOpenMissingFileIsEmptyNotAnError(t *testing.T) {
 	}
 	if len(s.List()) != 0 {
 		t.Error("a fresh registry must be empty")
+	}
+}
+
+func TestOpenRejectsCorruptJSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "devices.json")
+	if err := os.WriteFile(path, []byte("{not-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(path); err == nil {
+		t.Fatal("Open accepted corrupt JSON")
+	}
+}
+
+func TestRemove(t *testing.T) {
+	s := &Store{Devices: map[string]*Device{}}
+	const ieee = "A4:C1:38:18:56:07:FF:FF"
+	s.Observe(ieee, 0x90CB, time.Now())
+	if !s.Remove(ieee) {
+		t.Fatal("Remove returned false for a known device")
+	}
+	if s.Remove(ieee) {
+		t.Fatal("Remove returned true after the device was already removed")
 	}
 }
 

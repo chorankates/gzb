@@ -133,7 +133,9 @@ func handleReport(ctx context.Context, conn *ezsp.Conn, db *store.Store, g *glob
 	if d, ok := db.ByNodeID(msg.Sender); ok {
 		device = d
 		device.LastSeen = now
-		name = d.IEEE
+		if d.Identified() {
+			name = d.IEEE
+		}
 		if d.Label != "" {
 			name = d.Label
 		}
@@ -173,16 +175,17 @@ func handleReport(ctx context.Context, conn *ezsp.Conn, db *store.Store, g *glob
 			}
 			continue
 		}
-		if device != nil {
-			device.Record(reading.Name, reading.Value, reading.Unit, now)
+		if device == nil {
+			device, _ = db.ObserveNodeID(msg.Sender, now)
 		}
+		device.Record(reading.Name, reading.Value, reading.Unit, now)
 		if g.json {
 			line := reportLine{
 				At: now, NodeID: msg.Sender, Cluster: zcl.ClusterName(msg.APS.Cluster),
 				Name: reading.Name, Value: reading.Value, Unit: reading.Unit,
 				LQI: msg.LQI, RSSI: msg.RSSI,
 			}
-			if device != nil {
+			if device.Identified() {
 				line.IEEE = device.IEEE
 			}
 			if err := enc.Encode(line); err != nil {
