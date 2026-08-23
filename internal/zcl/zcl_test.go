@@ -137,6 +137,50 @@ func TestDecodeManufacturerCluster(t *testing.T) {
 	}
 }
 
+func TestInterpretSonoffTemperatureHumidityStatistics(t *testing.T) {
+	// One periodic FC11 burst from a SONOFF display sensor. Temperature values
+	// are signed int16; humidity values are unsigned uint16. Both use
+	// hundredths of their displayed unit.
+	frame, err := Decode([]byte{
+		0x18, 0x01, 0x0A,
+		0x08, 0x20, 0x29, 0xAC, 0x08, // temperature maximum: 22.20 °C
+		0x09, 0x20, 0x29, 0x84, 0x08, // temperature minimum: 21.80 °C
+		0x0A, 0x20, 0x29, 0x9A, 0x08, // temperature reference: 22.02 °C
+		0x0B, 0x20, 0x21, 0xAE, 0x10, // humidity maximum: 42.70%
+		0x0C, 0x20, 0x21, 0x68, 0x10, // humidity minimum: 42.00%
+		0x0D, 0x20, 0x21, 0x8E, 0x10, // humidity reference: 42.38%
+	})
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	attrs, err := frame.Attributes()
+	if err != nil {
+		t.Fatalf("Attributes: %v", err)
+	}
+
+	want := []Reading{
+		{Name: "temperature maximum", Value: 22.20, Unit: "°C"},
+		{Name: "temperature minimum", Value: 21.80, Unit: "°C"},
+		{Name: "temperature reference", Value: 22.02, Unit: "°C"},
+		{Name: "humidity maximum", Value: 42.70, Unit: "%"},
+		{Name: "humidity minimum", Value: 42.00, Unit: "%"},
+		{Name: "humidity reference", Value: 42.38, Unit: "%"},
+	}
+	if len(attrs) != len(want) {
+		t.Fatalf("got %d attributes, want %d", len(attrs), len(want))
+	}
+	for i, attr := range attrs {
+		got, ok := Interpret(ClusterSonoff, attr)
+		if !ok {
+			t.Errorf("attribute 0x%04X was not interpreted", attr.ID)
+			continue
+		}
+		if got != want[i] {
+			t.Errorf("attribute 0x%04X = %+v, want %+v", attr.ID, got, want[i])
+		}
+	}
+}
+
 func TestDecodeMultipleAttributes(t *testing.T) {
 	// Two records in one report, to prove the loop advances correctly.
 	frame, err := Decode([]byte{
