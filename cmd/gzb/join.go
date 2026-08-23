@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/conor/gzb/internal/ezsp"
-	"github.com/conor/gzb/internal/store"
+	"github.com/chorankates/gzb/internal/ezsp"
+	"github.com/chorankates/gzb/internal/store"
 )
 
 // cmdJoin opens the network and watches devices arrive.

@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/conor/gzb/internal/ezsp"
-	"github.com/conor/gzb/internal/store"
-	"github.com/conor/gzb/internal/zcl"
-	"github.com/conor/gzb/internal/zdo"
+	"github.com/chorankates/gzb/internal/ezsp"
+	"github.com/chorankates/gzb/internal/store"
+	"github.com/chorankates/gzb/internal/zcl"
+	"github.com/chorankates/gzb/internal/zdo"
 )
 
 // An interview asks a device what it is: its node descriptor, which endpoints

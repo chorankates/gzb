@@ -8,9 +8,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/conor/gzb/internal/ezsp"
-	"github.com/conor/gzb/internal/store"
-	"github.com/conor/gzb/internal/zcl"
+	"github.com/chorankates/gzb/internal/ezsp"
+	"github.com/chorankates/gzb/internal/store"
+	"github.com/chorankates/gzb/internal/zcl"
 )
 
 // cmdMonitor prints network traffic as it arrives.
@@ -110,14 +110,14 @@ type reportLine struct {
 	// Device is the name the device was given, if it has one. The identity is
 	// still the IEEE address; this is here so a stream of readings can be read
 	// without a second lookup.
-	Device  string `json:"device,omitempty"`
-	NodeID  uint16 `json:"node_id"`
-	Cluster string    `json:"cluster"`
-	Name    string    `json:"name"`
-	Value   float64   `json:"value"`
-	Unit    string    `json:"unit,omitempty"`
-	LQI     uint8     `json:"lqi"`
-	RSSI    int8      `json:"rssi"`
+	Device  string  `json:"device,omitempty"`
+	NodeID  uint16  `json:"node_id"`
+	Cluster string  `json:"cluster"`
+	Name    string  `json:"name"`
+	Value   float64 `json:"value"`
+	Unit    string  `json:"unit,omitempty"`
+	LQI     uint8   `json:"lqi"`
+	RSSI    int8    `json:"rssi"`
 }
 
 func handleReport(ctx context.Context, conn *ezsp.Conn, db *store.Store, g *globals, enc *json.Encoder, m ezsp.Message, raw bool) {

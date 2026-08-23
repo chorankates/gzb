@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/conor/gzb/internal/ash"
+	"github.com/chorankates/gzb/internal/ash"
 	"go.bug.st/serial"
 )
 

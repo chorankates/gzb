@@ -6,8 +6,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/conor/gzb/internal/ezsp"
-	"github.com/conor/gzb/internal/zcl"
+	"github.com/chorankates/gzb/internal/ezsp"
+	"github.com/chorankates/gzb/internal/zcl"
 )
 
 // The Time cluster is one of the few a coordinator is expected to serve rather

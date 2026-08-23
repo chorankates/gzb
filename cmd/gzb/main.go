@@ -12,8 +12,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/conor/gzb/internal/ash"
-	"github.com/conor/gzb/internal/ezsp"
+	"github.com/chorankates/gzb/internal/ash"
+	"github.com/chorankates/gzb/internal/ezsp"
 )
 
 const defaultPort = "/dev/ttyUSB0"

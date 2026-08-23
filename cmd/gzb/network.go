@@ -8,7 +8,7 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/conor/gzb/internal/ezsp"
+	"github.com/chorankates/gzb/internal/ezsp"
 )
 
 // cmdNetwork dispatches the network subcommands.

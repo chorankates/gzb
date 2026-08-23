@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/conor/gzb/internal/store"
+	"github.com/chorankates/gzb/internal/store"
 )
 
 // Naming is a registry operation, not a network one: it touches no hardware and
