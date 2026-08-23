@@ -114,6 +114,34 @@ func TestSaveAndReopen(t *testing.T) {
 	}
 }
 
+func TestOpenMigratesLegacyBatteryCapability(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "devices.json")
+	now := time.Now().Round(time.Millisecond)
+	s := &Store{path: path, Devices: map[string]*Device{
+		"sensor": {
+			IEEE: "sensor",
+			Readings: map[string]Reading{
+				"battery": {Value: 87.5, Unit: "%", At: now},
+			},
+		},
+	}}
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	readings := reopened.Devices["sensor"].Readings
+	if _, exists := readings["battery"]; exists {
+		t.Error("ambiguous legacy battery capability was retained")
+	}
+	if got := readings["battery percentage"]; got.Value != 87.5 || got.Unit != "%" {
+		t.Errorf("migrated battery percentage = %+v", got)
+	}
+}
+
 func TestOpenMissingFileIsEmptyNotAnError(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "absent.json"))
 	if err != nil {

@@ -87,8 +87,28 @@ func TestDecodeBatteryReport(t *testing.T) {
 	if !ok {
 		t.Fatal("battery attribute was not interpreted")
 	}
-	if r.Value != 100 {
+	if r.Name != "battery percentage" || r.Value != 100 || r.Unit != "%" {
 		t.Errorf("reading = %s, want 100.00 %% (0xC8 is 200 half-percents)", r)
+	}
+}
+
+func TestDecodeBatteryVoltageReport(t *testing.T) {
+	// Attribute 0x0020 is voltage in tenths of a volt and must remain distinct
+	// from the percentage attribute in streams and the device registry.
+	frame, err := Decode([]byte{0x18, 0xD5, 0x0A, 0x20, 0x00, 0x20, 0x1E})
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	attrs, err := frame.Attributes()
+	if err != nil {
+		t.Fatalf("Attributes: %v", err)
+	}
+	r, ok := Interpret(ClusterPowerConfiguration, attrs[0])
+	if !ok {
+		t.Fatal("battery voltage attribute was not interpreted")
+	}
+	if r.Name != "battery voltage" || r.Value != 3 || r.Unit != "V" {
+		t.Errorf("reading = %s, want battery voltage 3.00 V", r)
 	}
 }
 

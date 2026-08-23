@@ -159,8 +159,37 @@ func Open(path string) (*Store, error) {
 	if s.Devices == nil {
 		s.Devices = make(map[string]*Device)
 	}
+	for _, device := range s.Devices {
+		migrateLegacyBatteryReading(device)
+	}
 	s.path = path
 	return s, nil
+}
+
+// migrateLegacyBatteryReading splits the old ambiguous "battery" registry key
+// according to its unit. New reports already use distinct capability names;
+// this keeps existing registries from retaining a stale duplicate forever.
+func migrateLegacyBatteryReading(device *Device) {
+	if device == nil {
+		return
+	}
+	legacy, ok := device.Readings["battery"]
+	if !ok {
+		return
+	}
+	var name string
+	switch legacy.Unit {
+	case "V":
+		name = "battery voltage"
+	case "%":
+		name = "battery percentage"
+	default:
+		return
+	}
+	if _, exists := device.Readings[name]; !exists {
+		device.Readings[name] = legacy
+	}
+	delete(device.Readings, "battery")
 }
 
 // Path reports the file backing this store.
