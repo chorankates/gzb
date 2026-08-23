@@ -31,8 +31,8 @@ never emits a `0x7E`-terminated ASH frame.
 Three layers, each independently testable:
 
 ```
-cmd/gzb            CLI: probe, network, join, monitor, devices, config
-  internal/store   device registry: identities and last known readings
+cmd/gzb            CLI: probe, network, join, monitor, devices, name, config
+  internal/store   device registry: identities, names and last known readings
   internal/zcl     ZCL: attribute reports, readings, response encoding
   internal/ezsp    EZSP: negotiation, commands, callbacks, endpoints
     internal/ash   ASH: framing, CRC, randomization, ACK/retransmit
@@ -123,6 +123,9 @@ $ gzb permit-join 0                      # close again
 $ gzb join 90                            # open, and watch devices arrive
 $ gzb join --verbose 90                  # ...and show every APS frame
 $ gzb devices                            # list what has been seen
+$ gzb name 0x90CB living room thermo     # call a device something human
+$ gzb name                               # list the names
+$ gzb name --clear "living room thermo"  # forget one
 $ gzb monitor                            # print readings until Ctrl-C
 $ gzb monitor --for 60s --raw            # ...bounded, including undecoded frames
 $ gzb config                             # dump NCP configuration (diagnostic)
@@ -243,6 +246,55 @@ A4:C1:38:18:56:07:FF:FF  0x90CB
 `--json` emits one object per reading, and `--raw` additionally shows frames
 that carry no interpretable attributes.
 
+## Naming devices
+
+An IEEE address identifies a device but does not say what it is, and a network
+address is not even stable across a rejoin. `gzb name` attaches the missing
+half:
+
+```console
+$ gzb name 0x90CB living room thermo
+A4:C1:38:18:56:07:FF:FF is now "living room thermo".
+
+$ gzb monitor
+15:55:11  living room thermo       temperature     28.20 °C   lqi 255  rssi -25
+15:55:11  living room thermo       humidity        34.60 %    lqi 255  rssi -25
+```
+
+A name is not decoration: it is also an address. Anywhere a device can be
+given — `name`, `interview` — an IEEE address, a `0xNNNN` network address and a
+name are interchangeable, and names match loosely, so any unambiguous part will
+do:
+
+```console
+$ gzb interview thermo
+Interviewing living room thermo (0x90CB)
+```
+
+That is why names must be unique and cannot look like an address. Loose
+matching never guesses: a query matching several devices is an error that names
+them.
+
+```console
+$ gzb name bedroom
+gzb: "bedroom" matches 2 devices ("bedroom lamp", "bedroom sensor"); use the full name or an address
+```
+
+Naming touches no hardware, which matters more than it sounds: the moment you
+want to name a device is right after seeing it in a monitor log, and by then a
+battery sensor is asleep and unreachable. Listings keep both — the name for
+reading, the addresses for matching against other tools:
+
+```console
+$ gzb devices
+living room thermo  0x90CB  A4:C1:38:18:56:07:FF:FF
+  sleepy end device, last seen 2026-08-15T16:00:10-06:00
+  battery        100.00 %     (2026-08-15T15:55:15-06:00)
+```
+
+An unnamed device falls back to its interviewed model, and then to its address,
+so output is readable at every stage of knowing what a device is.
+
 ### Answering the Time cluster
 
 The coordinator serves cluster `0x000A` rather than only consuming clusters.
@@ -283,8 +335,10 @@ Working and verified against hardware, with a real device paired:
 - Trust-centre join policy, applied and verified by read-back
 - Pairing: all three join callbacks decoded, merged and recorded
 - ZCL attribute reports decoded into readings, and the device registry
+- Device names, and addressing a device by name wherever one is taken
 - Outbound unicast, exercised by the Time cluster responder
-- `probe`, `network`, `permit-join`, `join`, `devices`, `monitor`, `config`
+- `probe`, `network`, `permit-join`, `join`, `devices`, `name`, `monitor`,
+  `config`
 - Raw command escape hatch (`ezsp.Conn.Call`) for any unmodelled command
 
 Verified end to end with a SONOFF temperature/humidity sensor

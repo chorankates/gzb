@@ -71,6 +71,8 @@ func run(args []string) error {
 		return cmdJoin(ctx, &g, rest[1:])
 	case "devices":
 		return cmdDevices(ctx, &g, rest[1:])
+	case "name":
+		return cmdName(ctx, &g, rest[1:])
 	case "config":
 		return cmdConfig(ctx, &g, rest[1:])
 	case "monitor":
@@ -98,6 +100,7 @@ commands:
   permit-join <s>   open the network to new devices for s seconds, then exit
   join [s]          open the network and watch devices arrive (default 60s)
   devices           list devices in the local registry
+  name <dev> <name> call a device something human, e.g. "living room thermo"
   interview <dev>   ask a device what it is: endpoints, clusters, model
   monitor           print device reports as they arrive
   config            dump the NCP's configuration values (diagnostic)

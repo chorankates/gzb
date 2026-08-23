@@ -2,10 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -284,15 +284,15 @@ func cmdInterview(ctx context.Context, g *globals, args []string) error {
 	timeout := fs.Duration("timeout", defaultInterviewTimeout, "how long to wait for each reply")
 	all := fs.Bool("all", false, "interview every device in the registry")
 	fs.Usage = func() {
-		fmt.Fprint(os.Stderr, `usage: gzb interview [flags] [ieee | 0xNNNN]
+		fmt.Fprint(os.Stderr, `usage: gzb interview [flags] [device]
 
 Asks a device what it is: node descriptor, power descriptor, endpoints, the
 clusters each endpoint implements, and its manufacturer and model. Results are
 written to the device registry.
 
-The device may be named by IEEE address (as `+"`gzb devices`"+` prints it) or by its
-current network address in hex. With --all, every device in the registry is
-interviewed in turn.
+The device may be given as an IEEE address (as `+"`gzb devices`"+` prints it), as a
+network address in hex, or as the name `+"`gzb name`"+` gave it. With --all, every
+device in the registry is interviewed in turn.
 
 Battery devices sleep between transmissions and only receive while polling
 their parent, so an interview can take a while or time out entirely. The best
@@ -379,32 +379,27 @@ func interviewTargets(db *store.Store, args []string, all bool) ([]interviewTarg
 		}
 		targets := make([]interviewTarget, 0, len(devices))
 		for _, d := range devices {
-			targets = append(targets, interviewTarget{name: d.IEEE, ieee: d.IEEE, node: d.NodeID})
+			targets = append(targets, interviewTarget{name: d.Describe(), ieee: d.IEEE, node: d.NodeID})
 		}
 		return targets, nil
 	}
 
 	arg := args[0]
-	// A bare hex address addresses a device the registry may not know.
-	if strings.HasPrefix(arg, "0x") || strings.HasPrefix(arg, "0X") {
-		v, err := strconv.ParseUint(trimHexPrefix(arg), 16, 16)
-		if err != nil {
-			return nil, fmt.Errorf("invalid network address %q: %w", arg, err)
-		}
-		node := uint16(v)
-		target := interviewTarget{name: arg, node: node}
-		if d, ok := db.ByNodeID(node); ok {
-			target.ieee, target.name = d.IEEE, d.IEEE
-		}
-		return []interviewTarget{target}, nil
+	d, err := db.Resolve(arg)
+	if err == nil {
+		return []interviewTarget{{name: d.Describe(), ieee: d.IEEE, node: d.NodeID}}, nil
 	}
-
-	ieee := strings.ToUpper(arg)
-	d, ok := db.Get(ieee)
-	if !ok {
-		return nil, fmt.Errorf("no device %q in the registry (run `gzb devices` to list them)", arg)
+	// An ambiguous name is a question for the user, not something to fall back
+	// from — only "I have never heard of this" is worth trying another way.
+	if !errors.Is(err, store.ErrNoDevice) {
+		return nil, err
 	}
-	return []interviewTarget{{name: d.IEEE, ieee: d.IEEE, node: d.NodeID}}, nil
+	// A bare hex address addresses a device the registry may not know, which is
+	// how a device that joined while nothing was listening gets interviewed.
+	if node, ok := store.ParseNodeID(arg); ok {
+		return []interviewTarget{{name: arg, node: node}}, nil
+	}
+	return nil, resolveError(err)
 }
 
 // applyInterview records what the interview learned.

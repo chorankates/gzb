@@ -27,9 +27,11 @@ type Device struct {
 	NodeType   string  `json:"node_type,omitempty"`
 	Parent     *uint16 `json:"parent,omitempty"`
 	Capability *uint8  `json:"capability,omitempty"`
-	// Label is a user-assigned name. Nothing sets it yet, but it is the field
-	// that makes a device list readable, so it is persisted from the start.
-	Label string `json:"label,omitempty"`
+	// Name is what a person calls this device — "living room thermo". It is
+	// the field that makes a device list readable, and `gzb name` sets it.
+	// Names are unique across the registry so they can be used to address a
+	// device, not merely to label one.
+	Name string `json:"name,omitempty"`
 	// Readings holds the most recent value of each quantity the device
 	// reports, keyed by name. Sleepy devices are unreachable most of the time,
 	// so the last thing they volunteered is often the only thing available.
@@ -55,12 +57,13 @@ type Endpoint struct {
 	Output  []uint16 `json:"output_clusters,omitempty"`
 }
 
-// Describe names the device as well as what is known allows: its model if it
-// has been interviewed, otherwise its label, otherwise its address.
+// Describe names the device as well as what is known allows: the name a person
+// gave it, otherwise its model if it has been interviewed, otherwise its
+// address. It is never empty, so it is always safe to print.
 func (d *Device) Describe() string {
 	switch {
-	case d.Label != "":
-		return d.Label
+	case d.Name != "":
+		return d.Name
 	case d.Manufacturer != "" && d.Model != "":
 		return d.Manufacturer + " " + d.Model
 	case d.Model != "":

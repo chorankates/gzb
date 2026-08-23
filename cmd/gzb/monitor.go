@@ -105,9 +105,13 @@ flags:
 
 // reportLine is one decoded reading, for JSON output.
 type reportLine struct {
-	At      time.Time `json:"at"`
-	IEEE    string    `json:"ieee,omitempty"`
-	NodeID  uint16    `json:"node_id"`
+	At   time.Time `json:"at"`
+	IEEE string    `json:"ieee,omitempty"`
+	// Device is the name the device was given, if it has one. The identity is
+	// still the IEEE address; this is here so a stream of readings can be read
+	// without a second lookup.
+	Device  string `json:"device,omitempty"`
+	NodeID  uint16 `json:"node_id"`
 	Cluster string    `json:"cluster"`
 	Name    string    `json:"name"`
 	Value   float64   `json:"value"`
@@ -128,15 +132,15 @@ func handleReport(ctx context.Context, conn *ezsp.Conn, db *store.Store, g *glob
 	}
 
 	now := time.Now()
+	// An unknown sender can only be identified by the address it transmitted
+	// from; a known one is called whatever the registry can call it, which for
+	// a named device is the name a person chose.
 	name := fmt.Sprintf("0x%04X", msg.Sender)
 	var device *store.Device
 	if d, ok := db.ByNodeID(msg.Sender); ok {
 		device = d
 		device.LastSeen = now
-		name = d.IEEE
-		if d.Label != "" {
-			name = d.Label
-		}
+		name = d.Describe()
 	}
 
 	frame, err := zcl.Decode(msg.Payload)
@@ -183,7 +187,7 @@ func handleReport(ctx context.Context, conn *ezsp.Conn, db *store.Store, g *glob
 				LQI: msg.LQI, RSSI: msg.RSSI,
 			}
 			if device != nil {
-				line.IEEE = device.IEEE
+				line.IEEE, line.Device = device.IEEE, device.Name
 			}
 			if err := enc.Encode(line); err != nil {
 				fmt.Fprintf(os.Stderr, "gzb: %v\n", err)

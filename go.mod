@@ -1,4 +1,4 @@
-module github.com/conor/gzb
+module github.com/chorankates/gzb
 
 go 1.26.1
 

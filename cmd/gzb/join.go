@@ -154,7 +154,8 @@ watch:
 				msg.APS.SourceEP, msg.APS.DestEP, msg.LQI, msg.RSSI, msg.Payload)
 		case ev := <-events:
 			seen++
-			if recordEvent(db, ev) {
+			d, isNew := recordEvent(db, ev)
+			if isNew {
 				fresh++
 			}
 			if g.json {
@@ -162,7 +163,7 @@ watch:
 					return err
 				}
 			} else {
-				fmt.Println(formatEvent(start, ev))
+				fmt.Println(formatEvent(start, ev, d))
 			}
 		case err := <-errs:
 			// A callback we could not decode is worth reporting but not worth
@@ -215,11 +216,15 @@ func closeJoinWindow(conn *ezsp.Conn) {
 	}
 }
 
-// recordEvent merges an event into the registry, reporting whether the device
-// was previously unknown.
-func recordEvent(db *store.Store, ev ezsp.JoinEvent) bool {
+// recordEvent merges an event into the registry, returning the device it
+// concerns and whether it was previously unknown.
+//
+// A departing device is looked up but not recorded: leaving is not a sighting,
+// yet the record is what says whose departure this is.
+func recordEvent(db *store.Store, ev ezsp.JoinEvent) (*store.Device, bool) {
 	if ev.Leaving {
-		return false
+		d, _ := db.Get(ev.IEEE.String())
+		return d, false
 	}
 	d, isNew := db.Observe(ev.IEEE.String(), ev.NodeID, ev.At)
 	if ev.NodeType != nil {
@@ -233,11 +238,18 @@ func recordEvent(db *store.Store, ev ezsp.JoinEvent) bool {
 		c := uint8(*ev.Capability)
 		d.Capability = &c
 	}
-	return isNew
+	return d, isNew
 }
 
-func formatEvent(start time.Time, ev ezsp.JoinEvent) string {
+// formatEvent renders one join event. The device may be nil, for a departure of
+// something never recorded.
+func formatEvent(start time.Time, ev ezsp.JoinEvent, d *store.Device) string {
 	line := fmt.Sprintf("[%6.1fs] %-13s 0x%04X  %s", time.Since(start).Seconds(), ev.Kind, ev.NodeID, ev.IEEE)
+	// A returning device is recognised by name, which is the difference
+	// between "something joined" and "the living room thermo is back".
+	if d != nil && d.Name != "" {
+		line += "  " + d.Name
+	}
 
 	var detail string
 	switch {
@@ -292,16 +304,16 @@ flags:
 		return nil
 	}
 
+	var unnamed int
 	for _, d := range devices {
 		kind := d.NodeType
 		if kind == "" {
 			kind = "unknown type"
 		}
-		label := d.Label
-		if label == "" {
-			label = d.IEEE
+		if d.Name == "" {
+			unnamed++
 		}
-		fmt.Printf("%s  %s\n", label, d.NodeIDHex())
+		fmt.Println(deviceHeading(d))
 		fmt.Printf("  %s, last seen %s\n", kind, d.LastSeen.Format(time.RFC3339))
 		for _, name := range d.ReadingNames() {
 			r := d.Readings[name]
@@ -310,5 +322,21 @@ flags:
 		fmt.Println()
 	}
 	fmt.Printf("%d device(s) in %s\n", len(devices), db.Path())
+	if unnamed > 0 {
+		fmt.Printf("%d unnamed. `gzb name <device> living room thermo` makes the rest of the output readable.\n", unnamed)
+	}
 	return nil
+}
+
+// deviceHeading is the first line of a device listing: what to call the device,
+// then the addresses that identify it.
+//
+// The addresses stay even when there is a name, because a name is a convenience
+// and the IEEE address is the identity — anything that has to be matched
+// against another tool's output is matched on the address.
+func deviceHeading(d *store.Device) string {
+	if name := d.Describe(); name != d.IEEE {
+		return fmt.Sprintf("%s  %s  %s", name, d.NodeIDHex(), d.IEEE)
+	}
+	return fmt.Sprintf("%s  %s", d.IEEE, d.NodeIDHex())
 }
