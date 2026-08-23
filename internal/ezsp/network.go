@@ -36,11 +36,6 @@ const (
 	joinMACAssociation uint8 = 0x00
 )
 
-// EmberStatus values seen during formation.
-const (
-	StatusNetworkAlreadyUp EmberStatus = 0x91
-)
-
 // stackStatusNetworkUp is the EmberStatus reported by stackStatusHandler once
 // the network is live.
 const stackStatusNetworkUp EmberStatus = 0x90

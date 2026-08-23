@@ -151,6 +151,14 @@ func TestDecodeRejectsShortFrame(t *testing.T) {
 	}
 }
 
+func FuzzDecode(f *testing.F) {
+	f.Add([]byte{0xC1, 0x02, 0x02, 0x9B, 0x7B})
+	f.Add([]byte{0xC0, 0x38, 0xBC})
+	f.Fuzz(func(t *testing.T, raw []byte) {
+		_, _ = Decode(raw)
+	})
+}
+
 // TestVersionCommandFrame builds the frame we will actually send first, so a
 // regression in any layer shows up here rather than as a silent timeout.
 func TestVersionCommandFrame(t *testing.T) {

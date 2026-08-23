@@ -26,7 +26,7 @@ func (r *buf) need(n int) bool {
 		return false
 	}
 	if r.pos+n > len(r.b) {
-		r.err = fmt.Errorf("znp: payload truncated: need %d bytes at offset %d, have %d", n, r.pos, len(r.b))
+		r.err = fmt.Errorf("ezsp: payload truncated: need %d bytes at offset %d, have %d", n, r.pos, len(r.b))
 		return false
 	}
 	return true

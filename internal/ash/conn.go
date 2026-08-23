@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -49,6 +50,10 @@ type Conn struct {
 	// removes an entire class of ordering bug.
 	sendMu sync.Mutex
 
+	// writeMu prevents acknowledgements emitted by the read pump from being
+	// interleaved with DATA or reset frames written by callers.
+	writeMu sync.Mutex
+
 	mu     sync.Mutex
 	txSeq  uint8 // frame number for our next outgoing DATA frame
 	rxSeq  uint8 // frame number we next expect from the NCP
@@ -59,6 +64,17 @@ type Conn struct {
 	resetCh  chan Frame
 	readDone chan struct{}
 	readErr  error
+
+	droppedData  atomic.Uint64
+	droppedACK   atomic.Uint64
+	droppedReset atomic.Uint64
+}
+
+// Stats reports loss observed inside the ASH session.
+type Stats struct {
+	DroppedData  uint64
+	DroppedACK   uint64
+	DroppedReset uint64
 }
 
 // ackEvent reports an acknowledgement observed by the read pump. ASH
@@ -88,6 +104,15 @@ func NewConn(rw io.ReadWriteCloser, trace Tracer) *Conn {
 // Data returns the stream of EZSP payloads received from the NCP. The channel
 // closes when the connection does.
 func (c *Conn) Data() <-chan []byte { return c.dataCh }
+
+// Stats returns a point-in-time snapshot of ASH delivery counters.
+func (c *Conn) Stats() Stats {
+	return Stats{
+		DroppedData:  c.droppedData.Load(),
+		DroppedACK:   c.droppedACK.Load(),
+		DroppedReset: c.droppedReset.Load(),
+	}
+}
 
 // readPump owns all reads for the life of the connection.
 func (c *Conn) readPump() {
@@ -138,7 +163,11 @@ func (c *Conn) handle(f Frame) {
 		if f.FrmNum != expect {
 			// Out of order. A repeat of the previous frame is a retransmission
 			// whose ACK we lost, so re-ACK it; anything else needs a NAK.
-			c.write(Frame{Type: FrameNAK, AckNum: expect})
+			if f.FrmNum == (expect+7)%8 {
+				c.write(Frame{Type: FrameACK, AckNum: expect})
+			} else {
+				c.write(Frame{Type: FrameNAK, AckNum: expect})
+			}
 			return
 		}
 
@@ -154,6 +183,7 @@ func (c *Conn) handle(f Frame) {
 		default:
 			// Never stall the read pump on a slow consumer; stalling here
 			// would deadlock acknowledgement for every subsequent frame.
+			c.droppedData.Add(1)
 		}
 
 	case FrameACK:
@@ -166,6 +196,7 @@ func (c *Conn) handle(f Frame) {
 		select {
 		case c.resetCh <- f:
 		default:
+			c.droppedReset.Add(1)
 		}
 	}
 }
@@ -174,6 +205,7 @@ func (c *Conn) signalAck(ev ackEvent) {
 	select {
 	case c.ackCh <- ev:
 	default:
+		c.droppedACK.Add(1)
 	}
 }
 
@@ -183,6 +215,8 @@ func (c *Conn) write(f Frame) error {
 	if err != nil {
 		return err
 	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	if c.trace != nil {
 		c.trace("->", f)
 	}
@@ -207,12 +241,15 @@ func (c *Conn) Reset(ctx context.Context) (ResetCode, error) {
 	}
 	// The cancel byte tells the NCP to discard any partial frame it is
 	// holding, so RST is parsed cleanly even if we interrupted a transfer.
+	c.writeMu.Lock()
 	if _, err := c.rw.Write(append([]byte{CancelByte}, buf...)); err != nil {
+		c.writeMu.Unlock()
 		return 0, fmt.Errorf("ash: sending RST: %w", err)
 	}
 	if c.trace != nil {
 		c.trace("->", Frame{Type: FrameRST})
 	}
+	c.writeMu.Unlock()
 
 	ctx, cancel := context.WithTimeout(ctx, ResetTimeout)
 	defer cancel()

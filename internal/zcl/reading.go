@@ -29,6 +29,7 @@ const (
 	ClusterIASZone            uint16 = 0x0500
 	ClusterMetering           uint16 = 0x0702
 	ClusterElectricalMeasure  uint16 = 0x0B04
+	ClusterSonoff             uint16 = 0xFC11
 )
 
 // ClusterName renders a cluster ID, falling back to hex.
@@ -108,11 +109,21 @@ var interpretations = map[[2]uint16]interpretation{
 	{ClusterRelativeHumidity, 0x0000}:   {"humidity", "%", 0.01},
 	{ClusterPressure, 0x0000}:           {"pressure", "kPa", 0.1},
 	{ClusterIlluminance, 0x0000}:        {"illuminance", "lx", 1},
-	{ClusterPowerConfiguration, 0x0020}: {"battery", "V", 0.1},
-	{ClusterPowerConfiguration, 0x0021}: {"battery", "%", 0.5},
+	{ClusterPowerConfiguration, 0x0020}: {"battery voltage", "V", 0.1},
+	{ClusterPowerConfiguration, 0x0021}: {"battery percentage", "%", 0.5},
 	{ClusterOccupancySensing, 0x0000}:   {"occupancy", "", 1},
 	{ClusterOnOff, 0x0000}:              {"on/off", "", 1},
 	{ClusterLevelControl, 0x0000}:       {"level", "", 1},
+	// SONOFF display sensors report these device-maintained statistics in
+	// hundredths on their manufacturer cluster. The exact time window is
+	// firmware-dependent. The third value in each group is documented only as
+	// a reference value, so do not misrepresent it as current or average.
+	{ClusterSonoff, 0x2008}: {"temperature maximum", "°C", 0.01},
+	{ClusterSonoff, 0x2009}: {"temperature minimum", "°C", 0.01},
+	{ClusterSonoff, 0x200A}: {"temperature reference", "°C", 0.01},
+	{ClusterSonoff, 0x200B}: {"humidity maximum", "%", 0.01},
+	{ClusterSonoff, 0x200C}: {"humidity minimum", "%", 0.01},
+	{ClusterSonoff, 0x200D}: {"humidity reference", "%", 0.01},
 }
 
 // Interpret turns an attribute into a physical reading. It reports false when

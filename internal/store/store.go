@@ -14,8 +14,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
+
+const unknownIEEEPrefix = "unknown:"
 
 // Device is what we know about one node on the network.
 type Device struct {
@@ -121,6 +124,12 @@ func (d *Device) ReadingNames() []string {
 // NodeIDHex renders the network address the way Zigbee tools print it.
 func (d Device) NodeIDHex() string { return fmt.Sprintf("0x%04X", d.NodeID) }
 
+// Identified reports whether this record has a real IEEE address rather than
+// a temporary network-address placeholder.
+func (d Device) Identified() bool {
+	return !strings.HasPrefix(d.IEEE, unknownIEEEPrefix)
+}
+
 // Store is a set of devices persisted to a JSON file.
 type Store struct {
 	path    string
@@ -159,8 +168,37 @@ func Open(path string) (*Store, error) {
 	if s.Devices == nil {
 		s.Devices = make(map[string]*Device)
 	}
+	for _, device := range s.Devices {
+		migrateLegacyBatteryReading(device)
+	}
 	s.path = path
 	return s, nil
+}
+
+// migrateLegacyBatteryReading splits the old ambiguous "battery" registry key
+// according to its unit. New reports already use distinct capability names;
+// this keeps existing registries from retaining a stale duplicate forever.
+func migrateLegacyBatteryReading(device *Device) {
+	if device == nil {
+		return
+	}
+	legacy, ok := device.Readings["battery"]
+	if !ok {
+		return
+	}
+	var name string
+	switch legacy.Unit {
+	case "V":
+		name = "battery voltage"
+	case "%":
+		name = "battery percentage"
+	default:
+		return
+	}
+	if _, exists := device.Readings[name]; !exists {
+		device.Readings[name] = legacy
+	}
+	delete(device.Readings, "battery")
 }
 
 // Path reports the file backing this store.
@@ -176,12 +214,43 @@ func (s *Store) Path() string { return s.path }
 func (s *Store) Observe(ieee string, nodeID uint16, now time.Time) (*Device, bool) {
 	d, known := s.Devices[ieee]
 	if !known {
-		d = &Device{IEEE: ieee, FirstSeen: now}
+		placeholder := unknownIEEE(nodeID)
+		if pending, ok := s.Devices[placeholder]; ok {
+			delete(s.Devices, placeholder)
+			d = pending
+			d.IEEE = ieee
+			known = true
+		} else {
+			d = &Device{IEEE: ieee, FirstSeen: now}
+		}
 		s.Devices[ieee] = d
 	}
 	d.NodeID = nodeID
 	d.LastSeen = now
 	return d, !known
+}
+
+// ObserveNodeID records traffic from a node whose IEEE address is not yet
+// known. A later join event for the same network address promotes this
+// placeholder into the device's permanent IEEE-keyed record.
+func (s *Store) ObserveNodeID(nodeID uint16, now time.Time) (*Device, bool) {
+	if d, ok := s.ByNodeID(nodeID); ok {
+		d.LastSeen = now
+		return d, false
+	}
+	placeholder := unknownIEEE(nodeID)
+	d := &Device{
+		IEEE:      placeholder,
+		NodeID:    nodeID,
+		FirstSeen: now,
+		LastSeen:  now,
+	}
+	s.Devices[placeholder] = d
+	return d, true
+}
+
+func unknownIEEE(nodeID uint16) string {
+	return fmt.Sprintf("%s0x%04X", unknownIEEEPrefix, nodeID)
 }
 
 // Get returns a device by IEEE address.

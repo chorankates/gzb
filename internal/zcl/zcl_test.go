@@ -1,6 +1,44 @@
 package zcl
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
+
+func FuzzDecodeAndAttributes(f *testing.F) {
+	f.Add([]byte{0x18, 0x01, CmdReportAttributes, 0x00, 0x00, byte(TypeUint8), 0x2A})
+	f.Fuzz(func(t *testing.T, payload []byte) {
+		frame, err := Decode(payload)
+		if err == nil {
+			_, _ = frame.Attributes()
+		}
+	})
+}
+
+func TestReadAttributesResponseEncoding(t *testing.T) {
+	got, err := ReadAttributesResponse(0x42, []Record{
+		{ID: 0x0000, Type: TypeUTCTime, Value: uint64(0x12345678)},
+		{ID: 0x9999, Status: StatusUnsupportedAttribute},
+	})
+	if err != nil {
+		t.Fatalf("ReadAttributesResponse: %v", err)
+	}
+	want := []byte{
+		0x18, 0x42, CmdReadAttributesResponse,
+		0x00, 0x00, StatusSuccess, byte(TypeUTCTime), 0x78, 0x56, 0x34, 0x12,
+		0x99, 0x99, StatusUnsupportedAttribute,
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("response = % X, want % X", got, want)
+	}
+}
+
+func TestReadRequestRejectsPartialAttributeID(t *testing.T) {
+	frame := Frame{Type: FrameProfileWide, Command: CmdReadAttributes, Payload: []byte{0x01}}
+	if _, err := frame.ReadRequest(); err == nil {
+		t.Fatal("ReadRequest accepted a partial attribute ID")
+	}
+}
 
 // Every frame in this file was captured from a SONOFF temperature/humidity
 // sensor (A4:C1:38:18:56:07:FF:FF) reporting to this coordinator. Pinning the
@@ -87,8 +125,28 @@ func TestDecodeBatteryReport(t *testing.T) {
 	if !ok {
 		t.Fatal("battery attribute was not interpreted")
 	}
-	if r.Value != 100 {
+	if r.Name != "battery percentage" || r.Value != 100 || r.Unit != "%" {
 		t.Errorf("reading = %s, want 100.00 %% (0xC8 is 200 half-percents)", r)
+	}
+}
+
+func TestDecodeBatteryVoltageReport(t *testing.T) {
+	// Attribute 0x0020 is voltage in tenths of a volt and must remain distinct
+	// from the percentage attribute in streams and the device registry.
+	frame, err := Decode([]byte{0x18, 0xD5, 0x0A, 0x20, 0x00, 0x20, 0x1E})
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	attrs, err := frame.Attributes()
+	if err != nil {
+		t.Fatalf("Attributes: %v", err)
+	}
+	r, ok := Interpret(ClusterPowerConfiguration, attrs[0])
+	if !ok {
+		t.Fatal("battery voltage attribute was not interpreted")
+	}
+	if r.Name != "battery voltage" || r.Value != 3 || r.Unit != "V" {
+		t.Errorf("reading = %s, want battery voltage 3.00 V", r)
 	}
 }
 
@@ -134,6 +192,50 @@ func TestDecodeManufacturerCluster(t *testing.T) {
 	}
 	if got := ClusterName(0xFC11); got != "manufacturer 0xFC11" {
 		t.Errorf("ClusterName(0xFC11) = %q", got)
+	}
+}
+
+func TestInterpretSonoffTemperatureHumidityStatistics(t *testing.T) {
+	// One periodic FC11 burst from a SONOFF display sensor. Temperature values
+	// are signed int16; humidity values are unsigned uint16. Both use
+	// hundredths of their displayed unit.
+	frame, err := Decode([]byte{
+		0x18, 0x01, 0x0A,
+		0x08, 0x20, 0x29, 0xAC, 0x08, // temperature maximum: 22.20 °C
+		0x09, 0x20, 0x29, 0x84, 0x08, // temperature minimum: 21.80 °C
+		0x0A, 0x20, 0x29, 0x9A, 0x08, // temperature reference: 22.02 °C
+		0x0B, 0x20, 0x21, 0xAE, 0x10, // humidity maximum: 42.70%
+		0x0C, 0x20, 0x21, 0x68, 0x10, // humidity minimum: 42.00%
+		0x0D, 0x20, 0x21, 0x8E, 0x10, // humidity reference: 42.38%
+	})
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	attrs, err := frame.Attributes()
+	if err != nil {
+		t.Fatalf("Attributes: %v", err)
+	}
+
+	want := []Reading{
+		{Name: "temperature maximum", Value: 22.20, Unit: "°C"},
+		{Name: "temperature minimum", Value: 21.80, Unit: "°C"},
+		{Name: "temperature reference", Value: 22.02, Unit: "°C"},
+		{Name: "humidity maximum", Value: 42.70, Unit: "%"},
+		{Name: "humidity minimum", Value: 42.00, Unit: "%"},
+		{Name: "humidity reference", Value: 42.38, Unit: "%"},
+	}
+	if len(attrs) != len(want) {
+		t.Fatalf("got %d attributes, want %d", len(attrs), len(want))
+	}
+	for i, attr := range attrs {
+		got, ok := Interpret(ClusterSonoff, attr)
+		if !ok {
+			t.Errorf("attribute 0x%04X was not interpreted", attr.ID)
+			continue
+		}
+		if got != want[i] {
+			t.Errorf("attribute 0x%04X = %+v, want %+v", attr.ID, got, want[i])
+		}
 	}
 }
 

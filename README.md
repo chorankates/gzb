@@ -28,15 +28,46 @@ never emits a `0x7E`-terminated ASH frame.
 
 ## Architecture
 
-Three layers, each independently testable:
+The public `zigbee` package is the application boundary. It owns the report
+loop, registry enrichment and coordinator services so applications do not each
+grow their own EZSP/ZCL loop:
 
 ```
 cmd/gzb            CLI: probe, network, join, monitor, devices, name, config
+  zigbee           public coordinator API: readings, permit-join, Time service
   internal/store   device registry: identities, names and last known readings
   internal/zcl     ZCL: attribute reports, readings, response encoding
   internal/ezsp    EZSP: negotiation, commands, callbacks, endpoints
     internal/ash   ASH: framing, CRC, randomization, ACK/retransmit
       serial       115200 8N1, DTR and RTS deasserted
+```
+
+Applications can consume readings without depending on the protocol internals:
+
+```go
+coordinator, err := zigbee.Open(ctx, zigbee.Options{Path: "/dev/ttyUSB0"})
+if err != nil {
+	log.Fatal(err)
+}
+defer coordinator.Close()
+
+readings, errs := coordinator.Readings(ctx)
+for readings != nil || errs != nil {
+	select {
+	case reading, ok := <-readings:
+		if !ok {
+			readings = nil
+			continue
+		}
+		fmt.Printf("%s: %.2f %s\n", reading.Capability, reading.Value, reading.Unit)
+	case err, ok := <-errs:
+		if !ok {
+			errs = nil
+			continue
+		}
+		log.Print(err)
+	}
+}
 ```
 
 ### `internal/ash`

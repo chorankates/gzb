@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/chorankates/gzb/internal/ezsp"
+	"github.com/chorankates/gzb/zigbee"
 )
 
 // cmdNetwork dispatches the network subcommands.
@@ -201,21 +203,13 @@ standing invitation on the network and is best avoided.
 		return fmt.Errorf("invalid duration %q: %w", fs.Arg(0), err)
 	}
 
-	conn, err := dial(ctx, g)
+	coordinator, err := zigbee.Open(ctx, coordinatorOptions(g, ""))
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	defer coordinator.Close()
 
-	state, err := conn.NetworkState(ctx)
-	if err != nil {
-		return fmt.Errorf("reading network state: %w", err)
-	}
-	if !state.Joined() {
-		return fmt.Errorf("no network on this adapter (%s); form one first", state)
-	}
-
-	if err := conn.PermitJoining(ctx, uint8(seconds)); err != nil {
+	if err := coordinator.PermitJoin(ctx, time.Duration(seconds)*time.Second); err != nil {
 		return err
 	}
 	if seconds == 0 {
