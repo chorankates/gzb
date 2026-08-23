@@ -17,3 +17,4 @@ fuzz:
 	@go test -fuzz=FuzzDecode -fuzztime=10s ./internal/ash
 	@go test -fuzz=FuzzDecodeMessage -fuzztime=10s ./internal/ezsp
 	@go test -fuzz=FuzzDecodeAndAttributes -fuzztime=10s ./internal/zcl
+	@go test -fuzz=FuzzParseResponses -fuzztime=10s ./internal/zdo

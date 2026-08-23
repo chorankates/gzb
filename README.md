@@ -33,9 +33,10 @@ loop, registry enrichment and coordinator services so applications do not each
 grow their own EZSP/ZCL loop:
 
 ```
-cmd/gzb            CLI: probe, network, join, monitor, devices, name, config
-  zigbee           public coordinator API: readings, permit-join, Time service
+cmd/gzb            CLI: probe, network, join, monitor, devices, name, interview
+  zigbee           public coordinator API: readings, discovery, permit-join, Time
   internal/store   device registry: identities, names and last known readings
+  internal/zdo     ZDO: descriptors, endpoint discovery, transaction matching
   internal/zcl     ZCL: attribute reports, readings, response encoding
   internal/ezsp    EZSP: negotiation, commands, callbacks, endpoints
     internal/ash   ASH: framing, CRC, randomization, ACK/retransmit
@@ -203,6 +204,24 @@ to. ZDO discovery finds nothing, bindings have nothing to point at, and
 attribute reports are rejected. The device joins, finds a network it cannot
 use, and leaves a few seconds later.
 
+### Indirect transmission timeout
+
+`EZSP_CONFIG_INDIRECT_TRANSMISSION_TIMEOUT` defaults to **3000 ms**: the MAC
+holds a message for a sleepy child for three seconds, then discards it.
+
+A battery sensor polls its parent far less often than that. The request is
+gone before the device ever asks for it, and no amount of patience on the host
+helps — the wait that matters is the NCP's, not yours. On-demand traffic to a
+sleepy device therefore fails every time, and fails looking exactly like a dead
+device: no error, no reply, just the host's own timeout.
+
+gzb raises it to **30000 ms**, the stack maximum. That is necessary but not
+always sufficient, and the ceiling is the point: a device that polls less often
+than every thirty seconds still cannot be reached on demand, whatever the host
+does. Measured here, the SONOFF sensors are in that category — they sleep
+through a 30-second hold and a 45-second wait — so the only reliable moment to
+interview one remains while it is awake, immediately after it joins.
+
 ### Trust-centre policy
 
 Two separate things must both be true before a device can join:
@@ -276,6 +295,74 @@ A4:C1:38:18:56:07:FF:FF  0x90CB
 
 `--json` emits one object per reading, and `--raw` additionally shows frames
 that carry no interpretable attributes.
+
+## Asking a device what it is
+
+A device that has joined is only an address. ZDO — Zigbee Device Objects,
+profile `0x0000`, endpoint 0 at both ends — is the protocol that turns it into
+a description, and `gzb interview` asks the whole set of questions:
+
+```console
+$ gzb interview 0x0000
+Interviewing 0x0000 (0x0000)
+  node descriptor...
+  power descriptor...
+  active endpoints...
+  endpoint 1 descriptor...
+  manufacturer and model...
+
+  coordinator, mains, always listening
+  Manufacturer code 0xABCD
+  Powered by mains
+
+  Endpoint 1  profile 0x0104  device 0x0005
+    in   basic, identify, time, ota
+    out  basic, power, identify, groups, scenes, on/off, level, ...
+```
+
+The questions build on each other. The **node descriptor** says what kind of
+node this is and whether it is reachable on demand. The **active endpoint
+list** says where to address anything else, because an endpoint is where
+clusters live. A **simple descriptor** per endpoint says what that endpoint
+implements. Only then is there an endpoint to read the Basic cluster from,
+which is the one part of an interview that produces a name a person would
+recognise.
+
+Every request carries a transaction sequence number, and its response echoes
+it; the reply arrives on the request's cluster with bit 15 set. Both halves are
+checked, along with the answering node, because a sequence number is only
+unique per device — another node's reply can carry the same one.
+
+Results go to the device registry, so an unnamed device can be listed by what
+it is rather than by its address.
+
+### Interviewing something that is asleep
+
+This is the hard case, and it is the normal one. A sleepy device only receives
+while polling its parent, so a request sits in the NCP's indirect queue until
+it wakes — see [indirect transmission
+timeout](#indirect-transmission-timeout) for the ceiling on how long that queue
+will hold it. The best moment to interview a battery device is immediately
+after it joins, while it is still awake.
+
+A device that answers some questions and sleeps through the rest has still told
+you something, so a failed step is recorded and the interview continues:
+
+```console
+$ gzb interview "bedroom thermo"
+Interviewing bedroom thermo (0x90CB)
+  node descriptor...
+  power descriptor...
+  active endpoints...
+
+  ! ezsp: timed out waiting for NCP: no reply from 0x90CB on cluster 0x0002
+  ! ezsp: timed out waiting for NCP: no reply from 0x90CB on cluster 0x0003
+  ! ezsp: timed out waiting for NCP: no reply from 0x90CB on cluster 0x0005
+```
+
+Discovery does not need the readings loop stopped, which matters for exactly
+this reason: the moment a sleepy device is worth interviewing is while it is
+awake and reporting.
 
 ## Naming devices
 
@@ -355,8 +442,6 @@ EmberZNet 7.4.4.
 
 ## Status
 
-Working and verified against hardware:
-
 Working and verified against hardware, with a real device paired:
 
 - ASH framing, CRC, randomization, escaping, ACK and retransmission
@@ -366,10 +451,12 @@ Working and verified against hardware, with a real device paired:
 - Trust-centre join policy, applied and verified by read-back
 - Pairing: all three join callbacks decoded, merged and recorded
 - ZCL attribute reports decoded into readings, and the device registry
+- ZDO discovery: node and power descriptors, active endpoints, simple
+  descriptors, matched by transaction sequence and answering node
 - Device names, and addressing a device by name wherever one is taken
 - Outbound unicast, exercised by the Time cluster responder
 - `probe`, `network`, `permit-join`, `join`, `devices`, `name`, `monitor`,
-  `config`
+  `interview`, `config`
 - Raw command escape hatch (`ezsp.Conn.Call`) for any unmodelled command
 
 Verified end to end with a SONOFF temperature/humidity sensor
@@ -379,7 +466,6 @@ sensor actually sent.
 
 Not built yet:
 
-- ZDO queries: active endpoints, simple and node descriptors
 - Reading and writing attributes on demand, and configuring reporting
 - Cluster commands for lights, plugs and switches
 - Binding management
@@ -422,3 +508,21 @@ A4:C1:38:18:56:07:FF:FF  0x90CB
 1 device(s) in /home/conor/.config/gzb/devices.json
 ```
 
+```
+$ ./gzb interview "living room thermo"
+Interviewing living room thermo (0xCF83)
+  node descriptor...
+  power descriptor...
+  active endpoints...
+  endpoint 1 descriptor...
+  manufacturer and model...
+
+  SONOFF SNZB-02B
+  end device, battery, sleepy
+  Manufacturer code 0x1286
+  Powered by rechargeable battery
+
+  Endpoint 1  profile 0x0104  device 0x0302
+    in   basic, power, identify, temperature, humidity, cluster 0x0020, manufacturer 0xFC57, manufacturer 0xFC11
+    out  time, ota
+```

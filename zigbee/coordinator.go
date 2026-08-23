@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chorankates/gzb/internal/ash"
@@ -83,6 +84,7 @@ type connection interface {
 	NetworkState(context.Context) (ezsp.NetworkStatus, error)
 	Subscribe(func(ezsp.Message) bool, int) (<-chan ezsp.Message, func())
 	SendUnicast(context.Context, uint16, ezsp.APSFrame, uint8, []byte) (uint8, error)
+	Request(context.Context, uint16, ezsp.APSFrame, []byte, func(ezsp.IncomingMessage) bool) (ezsp.IncomingMessage, error)
 	AllowJoins(context.Context) error
 	PermitJoining(context.Context, uint8) error
 	Close() error
@@ -99,6 +101,11 @@ type Coordinator struct {
 	closed         bool
 	readingsActive bool
 	readingsDone   chan struct{}
+
+	// seq is the transaction sequence counter for request/response traffic.
+	// It is atomic rather than guarded by mu because discovery queries may run
+	// concurrently with each other and with an active readings loop.
+	seq atomic.Uint32
 }
 
 // Open connects to the adapter and restores its saved network, if any.

@@ -192,6 +192,15 @@ var requiredConfig = []struct {
 	// other than 2 rejects the beacon and never attempts to associate — so the
 	// coordinator sees complete silence rather than a failed join.
 	{ConfigStackProfile, 2, "ZigBee PRO"},
+
+	// How long the MAC holds a message for a sleepy child before discarding
+	// it. The firmware default of three seconds is shorter than the interval
+	// at which a battery sensor polls its parent, so anything sent to one is
+	// dropped before the device ever asks for it — no matter how long the host
+	// is willing to wait. That makes on-demand requests to a sleepy device,
+	// ZDO discovery above all, fail every time and look like a dead device.
+	// 30 seconds is the stack's maximum.
+	{ConfigIndirectTxTimeout, 30000, "hold messages for sleepy children"},
 	{ConfigSecurityLevel, 5, "standard Zigbee security"},
 }
 

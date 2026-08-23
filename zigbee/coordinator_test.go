@@ -18,12 +18,26 @@ type fakeConnection struct {
 	state ezsp.NetworkStatus
 	msgs  chan ezsp.Message
 
+	// responder answers a Request the way a device would. Returning false
+	// leaves the request unanswered, which is what a sleeping device looks
+	// like from here.
+	responder func(dest uint16, aps ezsp.APSFrame, payload []byte) (ezsp.IncomingMessage, bool)
+
 	mu             sync.Mutex
 	allowJoins     int
 	permitCalls    int
 	permitDuration uint8
 	sent           int
+	requests       []sentRequest
 	closeOnce      sync.Once
+}
+
+// sentRequest records what was asked, so a test can check the question as well
+// as the answer.
+type sentRequest struct {
+	dest    uint16
+	aps     ezsp.APSFrame
+	payload []byte
 }
 
 func newFakeConnection() *fakeConnection {
@@ -43,6 +57,24 @@ func (f *fakeConnection) SendUnicast(context.Context, uint16, ezsp.APSFrame, uin
 	defer f.mu.Unlock()
 	f.sent++
 	return 1, nil
+}
+
+// Request answers from the fake device, applying the caller's own match
+// function so that reply matching is exercised rather than assumed. An
+// unanswered or unmatched request waits for the context, as the real one does.
+func (f *fakeConnection) Request(ctx context.Context, dest uint16, aps ezsp.APSFrame, payload []byte, match func(ezsp.IncomingMessage) bool) (ezsp.IncomingMessage, error) {
+	f.mu.Lock()
+	f.requests = append(f.requests, sentRequest{dest: dest, aps: aps, payload: append([]byte(nil), payload...)})
+	responder := f.responder
+	f.mu.Unlock()
+
+	if responder != nil {
+		if reply, ok := responder(dest, aps, payload); ok && match(reply) {
+			return reply, nil
+		}
+	}
+	<-ctx.Done()
+	return ezsp.IncomingMessage{}, ctx.Err()
 }
 
 func (f *fakeConnection) AllowJoins(context.Context) error {
