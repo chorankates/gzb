@@ -32,45 +32,33 @@ const (
 	ClusterSonoff             uint16 = 0xFC11
 )
 
+// clusterNames is the one place a cluster's short name is written down, so
+// that printing an ID and accepting one on a command line cannot disagree.
+var clusterNames = map[uint16]string{
+	ClusterBasic:              "basic",
+	ClusterPowerConfiguration: "power",
+	ClusterIdentify:           "identify",
+	ClusterGroups:             "groups",
+	ClusterScenes:             "scenes",
+	ClusterOnOff:              "on/off",
+	ClusterLevelControl:       "level",
+	ClusterTime:               "time",
+	ClusterOTAUpgrade:         "ota",
+	ClusterColorControl:       "color",
+	ClusterIlluminance:        "illuminance",
+	ClusterTemperature:        "temperature",
+	ClusterPressure:           "pressure",
+	ClusterRelativeHumidity:   "humidity",
+	ClusterOccupancySensing:   "occupancy",
+	ClusterIASZone:            "ias zone",
+	ClusterMetering:           "metering",
+	ClusterElectricalMeasure:  "electrical",
+}
+
 // ClusterName renders a cluster ID, falling back to hex.
 func ClusterName(id uint16) string {
-	switch id {
-	case ClusterBasic:
-		return "basic"
-	case ClusterPowerConfiguration:
-		return "power"
-	case ClusterIdentify:
-		return "identify"
-	case ClusterGroups:
-		return "groups"
-	case ClusterScenes:
-		return "scenes"
-	case ClusterOnOff:
-		return "on/off"
-	case ClusterLevelControl:
-		return "level"
-	case ClusterTime:
-		return "time"
-	case ClusterOTAUpgrade:
-		return "ota"
-	case ClusterColorControl:
-		return "color"
-	case ClusterIlluminance:
-		return "illuminance"
-	case ClusterTemperature:
-		return "temperature"
-	case ClusterPressure:
-		return "pressure"
-	case ClusterRelativeHumidity:
-		return "humidity"
-	case ClusterOccupancySensing:
-		return "occupancy"
-	case ClusterIASZone:
-		return "ias zone"
-	case ClusterMetering:
-		return "metering"
-	case ClusterElectricalMeasure:
-		return "electrical"
+	if name, ok := clusterNames[id]; ok {
+		return name
 	}
 	if id >= 0xFC00 {
 		return fmt.Sprintf("manufacturer 0x%04X", id)
@@ -92,53 +80,30 @@ func (r Reading) String() string {
 	return fmt.Sprintf("%s %.2f %s", r.Name, r.Value, r.Unit)
 }
 
-// interpretation describes how to turn a raw attribute into a reading.
-type interpretation struct {
-	name  string
-	unit  string
-	scale float64
-}
-
-// interpretations maps (cluster, attribute) to a physical quantity.
-//
-// The scale factors are from the ZCL specification: temperature and humidity
-// are reported in hundredths, battery percentage in half-percent steps, and
-// pressure in tenths of a kilopascal.
-var interpretations = map[[2]uint16]interpretation{
-	{ClusterTemperature, 0x0000}:        {"temperature", "°C", 0.01},
-	{ClusterRelativeHumidity, 0x0000}:   {"humidity", "%", 0.01},
-	{ClusterPressure, 0x0000}:           {"pressure", "kPa", 0.1},
-	{ClusterIlluminance, 0x0000}:        {"illuminance", "lx", 1},
-	{ClusterPowerConfiguration, 0x0020}: {"battery voltage", "V", 0.1},
-	{ClusterPowerConfiguration, 0x0021}: {"battery percentage", "%", 0.5},
-	{ClusterOccupancySensing, 0x0000}:   {"occupancy", "", 1},
-	{ClusterOnOff, 0x0000}:              {"on/off", "", 1},
-	{ClusterLevelControl, 0x0000}:       {"level", "", 1},
-	// SONOFF display sensors report these device-maintained statistics in
-	// hundredths on their manufacturer cluster. The exact time window is
-	// firmware-dependent. The third value in each group is documented only as
-	// a reference value, so do not misrepresent it as current or average.
-	{ClusterSonoff, 0x2008}: {"temperature maximum", "°C", 0.01},
-	{ClusterSonoff, 0x2009}: {"temperature minimum", "°C", 0.01},
-	{ClusterSonoff, 0x200A}: {"temperature reference", "°C", 0.01},
-	{ClusterSonoff, 0x200B}: {"humidity maximum", "%", 0.01},
-	{ClusterSonoff, 0x200C}: {"humidity minimum", "%", 0.01},
-	{ClusterSonoff, 0x200D}: {"humidity reference", "%", 0.01},
-}
-
 // Interpret turns an attribute into a physical reading. It reports false when
 // the attribute has no known interpretation, or holds a value that is not
 // numeric.
 func Interpret(cluster uint16, a Attribute) (Reading, bool) {
-	spec, ok := interpretations[[2]uint16{cluster, a.ID}]
-	if !ok {
-		return Reading{}, false
-	}
 	n, ok := numeric(a.Value)
 	if !ok {
 		return Reading{}, false
 	}
-	return Reading{Name: spec.name, Value: n * spec.scale, Unit: spec.unit}, true
+	return Scale(cluster, a.ID, n)
+}
+
+// Scale renders a raw attribute value as the quantity it stands for, without
+// needing a decoded attribute to do it.
+//
+// This is what makes a reportable change legible. The threshold travels on the
+// wire in the attribute's own units, so a temperature takes 50 to mean half a
+// degree; saying so before the device is asked is what turns a mistake by a
+// factor of a hundred into something a person notices.
+func Scale(cluster, attr uint16, raw float64) (Reading, bool) {
+	spec, ok := attributes[[2]uint16{cluster, attr}]
+	if !ok || spec.scale == 0 {
+		return Reading{}, false
+	}
+	return Reading{Name: spec.name, Value: raw * spec.scale, Unit: spec.unit}, true
 }
 
 // numeric converts a decoded attribute value to a float, if it is a number.
@@ -158,22 +123,4 @@ func numeric(v any) (float64, bool) {
 	default:
 		return 0, false
 	}
-}
-
-// AttributeName renders a well-known attribute ID for a cluster.
-func AttributeName(cluster, attr uint16) string {
-	if spec, ok := interpretations[[2]uint16{cluster, attr}]; ok {
-		return spec.name
-	}
-	if cluster == ClusterBasic {
-		switch attr {
-		case 0x0004:
-			return "manufacturer"
-		case 0x0005:
-			return "model"
-		case 0x0007:
-			return "power source"
-		}
-	}
-	return fmt.Sprintf("attr 0x%04X", attr)
 }

@@ -16,7 +16,6 @@ package zigbee
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/chorankates/gzb/internal/ezsp"
@@ -30,6 +29,12 @@ const DefaultInterviewTimeout = 30 * time.Second
 
 // zdoEndpoint is the endpoint ZDO always travels on, at both ends.
 const zdoEndpoint uint8 = 0
+
+// The two Basic cluster attributes that say what a device is.
+const (
+	attrManufacturer uint16 = 0x0004
+	attrModel        uint16 = 0x0005
+)
 
 // NodeDescriptor describes a device's role and capabilities as a network node.
 type NodeDescriptor struct {
@@ -338,53 +343,25 @@ func (c *Coordinator) Interview(ctx context.Context, node uint16, opts Interview
 }
 
 // readBasic reads the manufacturer and model strings from the Basic cluster.
+//
+// This is a plain attribute read like any other, so it goes through the same
+// path a caller would use rather than a second copy of it.
 func (c *Coordinator) readBasic(ctx context.Context, node uint16, endpoint uint8) (manufacturer, model string, err error) {
-	if err := c.checkOpen(); err != nil {
-		return "", "", err
-	}
-
-	const attrManufacturer, attrModel = 0x0004, 0x0005
-	seq := c.nextSequence()
-	payload := zcl.ReadAttributesRequest(seq, []uint16{attrManufacturer, attrModel})
-	aps := ezsp.APSFrame{
-		Profile:  ezsp.ProfileHomeAutomation,
-		Cluster:  zcl.ClusterBasic,
-		SourceEP: ezsp.DefaultEndpoint.ID,
-		DestEP:   endpoint,
-		Options:  ezsp.APSOptionRetry,
-	}
-
-	msg, err := c.conn.Request(ctx, node, aps, payload, func(m ezsp.IncomingMessage) bool {
-		if m.APS.Cluster != zcl.ClusterBasic || m.Sender != node {
-			return false
-		}
-		f, err := zcl.Decode(m.Payload)
-		return err == nil && f.Sequence == seq && f.Command == zcl.CmdReadAttributesResponse
-	})
+	target := Target{Node: node, Endpoint: endpoint, Cluster: zcl.ClusterBasic}
+	values, err := c.ReadAttributes(ctx, target, []uint16{attrManufacturer, attrModel})
 	if err != nil {
 		return "", "", err
 	}
-
-	frame, err := zcl.Decode(msg.Payload)
-	if err != nil {
-		return "", "", err
-	}
-	attrs, err := frame.Attributes()
-	if err != nil {
-		return "", "", err
-	}
-	for _, a := range attrs {
-		s, ok := a.Value.(string)
+	for _, value := range values {
+		text, ok := value.Value.(string)
 		if !ok {
 			continue
 		}
-		// Some devices pad these with trailing NULs.
-		s = strings.TrimRight(s, "\x00")
-		switch a.ID {
+		switch value.ID {
 		case attrManufacturer:
-			manufacturer = s
+			manufacturer = text
 		case attrModel:
-			model = s
+			model = text
 		}
 	}
 	return manufacturer, model, nil

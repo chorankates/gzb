@@ -11,6 +11,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"strconv"
+	"strings"
 )
 
 // FrameType distinguishes commands defined for every cluster from those
@@ -44,6 +46,8 @@ const (
 	CmdWriteAttributesResponse   uint8 = 0x04
 	CmdConfigureReporting        uint8 = 0x06
 	CmdConfigureReportingRsp     uint8 = 0x07
+	CmdReadReportingConfig       uint8 = 0x08
+	CmdReadReportingConfigRsp    uint8 = 0x09
 	CmdReportAttributes          uint8 = 0x0A
 	CmdDefaultResponse           uint8 = 0x0B
 	CmdDiscoverAttributes        uint8 = 0x0C
@@ -65,6 +69,10 @@ func CommandName(cmd uint8) string {
 		return "configure reporting"
 	case CmdConfigureReportingRsp:
 		return "configure reporting response"
+	case CmdReadReportingConfig:
+		return "read reporting configuration"
+	case CmdReadReportingConfigRsp:
+		return "read reporting configuration response"
 	case CmdReportAttributes:
 		return "report attributes"
 	case CmdDefaultResponse:
@@ -206,6 +214,79 @@ const (
 	TypeIEEE    DataType = 0xF0
 )
 
+// Analog reports whether a data type measures a continuous quantity.
+//
+// This is the distinction a reporting configuration turns on. An analog
+// attribute needs a reportable change — "tell me when the temperature moves by
+// half a degree" — because otherwise a sensor with a noisy last digit would
+// transmit constantly. A discrete one does not: any change at all is the whole
+// event, and there is nothing to threshold.
+func (t DataType) Analog() bool {
+	switch {
+	case t >= TypeUint8 && t <= 0x27: // unsigned integers, 8 through 64 bit
+		return true
+	case t >= TypeInt8 && t <= 0x2F: // signed integers
+		return true
+	case t >= 0x38 && t <= 0x3A: // semi, single and double precision
+		return true
+	case t >= 0xE0 && t <= TypeUTCTime: // time of day, date, UTC time
+		return true
+	default:
+		return false
+	}
+}
+
+// typeNames is how a data type is written when a person has to choose one, as
+// on a command line telling gzb how to encode a value.
+var typeNames = map[DataType]string{
+	TypeNoData:   "nodata",
+	TypeData8:    "data8",
+	TypeBool:     "bool",
+	TypeBitmap8:  "bitmap8",
+	TypeBitmap16: "bitmap16",
+	TypeBitmap32: "bitmap32",
+	TypeUint8:    "uint8",
+	TypeUint16:   "uint16",
+	TypeUint24:   "uint24",
+	TypeUint32:   "uint32",
+	TypeUint48:   "uint48",
+	TypeInt8:     "int8",
+	TypeInt16:    "int16",
+	TypeInt24:    "int24",
+	TypeInt32:    "int32",
+	TypeEnum8:    "enum8",
+	TypeEnum16:   "enum16",
+	TypeSingle:   "single",
+	TypeOctetStr: "octets",
+	TypeCharStr:  "string",
+	TypeUTCTime:  "utc",
+	TypeIEEE:     "ieee",
+}
+
+// String names a data type. A type gzb has no name for renders as hex in the
+// form ParseDataType accepts, so anything printed can be given back.
+func (t DataType) String() string {
+	if name, ok := typeNames[t]; ok {
+		return name
+	}
+	return fmt.Sprintf("0x%02X", uint8(t))
+}
+
+// ParseDataType resolves a data type written by name or as a hex code.
+func ParseDataType(s string) (DataType, bool) {
+	for t, name := range typeNames {
+		if strings.EqualFold(name, s) {
+			return t, true
+		}
+	}
+	if len(s) > 2 && strings.EqualFold(s[:2], "0x") {
+		if v, err := strconv.ParseUint(s[2:], 16, 8); err == nil {
+			return DataType(v), true
+		}
+	}
+	return 0, false
+}
+
 // decodeValue reads one attribute value of the given type.
 func decodeValue(r *cursor, t DataType) any {
 	switch t {
@@ -340,4 +421,176 @@ func (r *cursor) remaining() int {
 		return 0
 	}
 	return len(r.b) - r.pos
+}
+
+// WriteResult is one attribute's outcome from a Write Attributes Response.
+type WriteResult struct {
+	ID     uint16
+	Status uint8
+}
+
+// WriteResponse decodes a Write Attributes Response.
+//
+// The frame is asymmetric by design: when every write succeeded the device
+// sends a single success byte and names no attributes at all, and only
+// failures are listed individually. Passing the IDs that were requested lets
+// that shorthand be expanded, so a caller sees one result per attribute either
+// way and does not have to reimplement the special case.
+func (f Frame) WriteResponse(requested []uint16) ([]WriteResult, error) {
+	if f.Type != FrameProfileWide || f.Command != CmdWriteAttributesResponse {
+		return nil, fmt.Errorf("zcl: %s is not a write response", CommandName(f.Command))
+	}
+	if len(f.Payload) == 1 && f.Payload[0] == StatusSuccess {
+		out := make([]WriteResult, 0, len(requested))
+		for _, id := range requested {
+			out = append(out, WriteResult{ID: id})
+		}
+		return out, nil
+	}
+
+	r := &cursor{b: f.Payload}
+	var out []WriteResult
+	for r.remaining() > 0 && r.err == nil {
+		status := r.u8()
+		id := r.u16()
+		if r.err != nil {
+			break
+		}
+		out = append(out, WriteResult{ID: id, Status: status})
+	}
+	if r.err != nil {
+		return out, fmt.Errorf("zcl: decoding write response: %w", r.err)
+	}
+	return out, nil
+}
+
+// ReportResult is one attribute's outcome from a Configure Reporting Response.
+type ReportResult struct {
+	ID        uint16
+	Direction uint8
+	Status    uint8
+}
+
+// ConfigureReportingResponse decodes a Configure Reporting Response. It uses
+// the same all-succeeded shorthand as a write response, and expands it the
+// same way.
+func (f Frame) ConfigureReportingResponse(requested []uint16) ([]ReportResult, error) {
+	if f.Type != FrameProfileWide || f.Command != CmdConfigureReportingRsp {
+		return nil, fmt.Errorf("zcl: %s is not a configure reporting response", CommandName(f.Command))
+	}
+	if len(f.Payload) == 1 && f.Payload[0] == StatusSuccess {
+		out := make([]ReportResult, 0, len(requested))
+		for _, id := range requested {
+			out = append(out, ReportResult{ID: id})
+		}
+		return out, nil
+	}
+
+	r := &cursor{b: f.Payload}
+	var out []ReportResult
+	for r.remaining() > 0 && r.err == nil {
+		status := r.u8()
+		direction := r.u8()
+		id := r.u16()
+		if r.err != nil {
+			break
+		}
+		out = append(out, ReportResult{ID: id, Direction: direction, Status: status})
+	}
+	if r.err != nil {
+		return out, fmt.Errorf("zcl: decoding configure reporting response: %w", r.err)
+	}
+	return out, nil
+}
+
+// DefaultResponse is what a device sends when it has nothing specific to say
+// about a command — most usefully, that it does not implement it.
+type DefaultResponse struct {
+	// Command is the command being answered, not this one.
+	Command uint8
+	Status  uint8
+}
+
+// DefaultResponse decodes a Default Response.
+func (f Frame) DefaultResponse() (DefaultResponse, error) {
+	if f.Type != FrameProfileWide || f.Command != CmdDefaultResponse {
+		return DefaultResponse{}, fmt.Errorf("zcl: %s is not a default response", CommandName(f.Command))
+	}
+	r := &cursor{b: f.Payload}
+	d := DefaultResponse{Command: r.u8(), Status: r.u8()}
+	if r.err != nil {
+		return DefaultResponse{}, fmt.Errorf("zcl: decoding default response: %w", r.err)
+	}
+	return d, nil
+}
+
+// ReportingStatus is one attribute's reporting configuration as a device
+// actually holds it.
+type ReportingStatus struct {
+	ID     uint16
+	Status uint8
+	Type   DataType
+	Min    uint16
+	Max    uint16
+	// Change is the reportable change, present only for analog attributes.
+	Change []byte
+}
+
+// Reporting reports whether the device is configured to send this attribute at
+// all. A maximum interval of 0xFFFF is the specification's way of saying it is
+// not.
+func (r ReportingStatus) Reporting() bool {
+	return r.Status == StatusSuccess && r.Max != MaxIntervalDisabled
+}
+
+// ReadReportingConfigResponse decodes a Read Reporting Configuration Response.
+//
+// Unlike the other attribute responses this one has no all-succeeded
+// shorthand: every attribute asked about is answered individually, and a
+// failed record carries no configuration behind it.
+func (f Frame) ReadReportingConfigResponse() ([]ReportingStatus, error) {
+	if f.Type != FrameProfileWide || f.Command != CmdReadReportingConfigRsp {
+		return nil, fmt.Errorf("zcl: %s is not a read reporting configuration response", CommandName(f.Command))
+	}
+
+	r := &cursor{b: f.Payload}
+	var out []ReportingStatus
+	for r.remaining() > 0 && r.err == nil {
+		status := r.u8()
+		direction := r.u8()
+		record := ReportingStatus{Status: status, ID: r.u16()}
+		if r.err != nil {
+			break
+		}
+		if status != StatusSuccess {
+			out = append(out, record)
+			continue
+		}
+		if direction != 0x00 {
+			// The receiving direction carries a timeout instead of a
+			// configuration, and a hub being reported to has no use for it.
+			r.u16()
+			out = append(out, record)
+			continue
+		}
+		record.Type = DataType(r.u8())
+		record.Min = r.u16()
+		record.Max = r.u16()
+		if record.Type.Analog() {
+			start := r.pos
+			decodeValue(r, record.Type)
+			if r.err != nil {
+				break
+			}
+			record.Change = f.Payload[start:r.pos]
+		}
+		if r.err != nil {
+			break
+		}
+		out = append(out, record)
+	}
+	if r.err != nil {
+		return out, fmt.Errorf("zcl: decoding reporting configuration: %w", r.err)
+	}
+	return out, nil
 }

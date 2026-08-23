@@ -80,6 +80,12 @@ func run(args []string) error {
 		return cmdMonitor(ctx, &g, rest[1:])
 	case "interview":
 		return cmdInterview(ctx, &g, rest[1:])
+	case "read":
+		return cmdRead(ctx, &g, rest[1:])
+	case "write":
+		return cmdWrite(ctx, &g, rest[1:])
+	case "reporting":
+		return cmdReporting(ctx, &g, rest[1:])
 	case "help", "-h", "--help":
 		usage(fs)
 		return nil
@@ -103,6 +109,9 @@ commands:
   devices           list devices in the local registry
   name <dev> <name> call a device something human, e.g. "living room thermo"
   interview <dev>   ask a device what it is: endpoints, clusters, model
+  read <dev> ...    read attributes now, instead of waiting to be told
+  write <dev> ...   set attributes on a device
+  reporting <dev>   ask a device to report an attribute on its own
   monitor           print device reports as they arrive
   config            dump the NCP's configuration values (diagnostic)
   help              show this message

@@ -33,11 +33,14 @@ loop, registry enrichment and coordinator services so applications do not each
 grow their own EZSP/ZCL loop:
 
 ```
-cmd/gzb            CLI: probe, network, join, monitor, devices, name, interview
-  zigbee           public coordinator API: readings, discovery, permit-join, Time
+cmd/gzb            CLI: probe, network, join, monitor, devices, name,
+                        interview, read, write, reporting
+  zigbee           public coordinator API: readings, discovery, attributes,
+                        reporting, permit-join, Time
   internal/store   device registry: identities, names and last known readings
   internal/zdo     ZDO: descriptors, endpoint discovery, transaction matching
-  internal/zcl     ZCL: attribute reports, readings, response encoding
+  internal/zcl     ZCL: attribute reports and readings, request and response
+                        encoding, the attribute table
   internal/ezsp    EZSP: negotiation, commands, callbacks, endpoints
     internal/ash   ASH: framing, CRC, randomization, ACK/retransmit
       serial       115200 8N1, DTR and RTS deasserted
@@ -364,6 +367,138 @@ Discovery does not need the readings loop stopped, which matters for exactly
 this reason: the moment a sleepy device is worth interviewing is while it is
 awake and reporting.
 
+## Reading and writing attributes
+
+An interview says what a device *can* do. An attribute is what it is doing:
+`gzb read` asks now, rather than waiting to be told.
+
+Most of the time asking is unnecessary — a sensor reports on its own and
+`monitor` catches it. It earns its place when the report has not arrived yet,
+when the attribute is one the device never reports, or when the question is
+whether a write took effect.
+
+<!--CAPTURE:read-success-->
+
+Clusters and attributes may be named or given in hex, and the two forms are
+interchangeable — `temperature` and `0x0402` address the same cluster. With no
+attribute named, gzb asks for every attribute it knows on that cluster, which
+is a serviceable way to find out what a device actually implements: it answers
+for the ones it has and says `unsupported attribute` for the rest.
+
+Naming is checked before anything goes out on the wire, because the failure is
+otherwise silent and thirty seconds long:
+
+```console
+$ gzb read "living room thermo" temperature humidity
+gzb: unknown attribute "humidity" on cluster temperature (name one gzb knows, or give a hex ID like 0x0000)
+```
+
+`humidity` is a cluster, not an attribute of `temperature`. Both are named in
+the same vocabulary, and the position on the command line is what distinguishes
+them.
+
+The endpoint comes from the registry: whichever endpoint the interview found
+that cluster on. A device that has never been interviewed falls back to
+endpoint 1, where a device with only one endpoint puts everything, and
+`--endpoint` overrides both.
+
+Values that gzb recognises as measurements are written to the registry exactly
+as a report would be. A reading is a reading whether the device volunteered it
+or was asked.
+
+### Writing
+
+`gzb write` is the same addressing in the other direction. Several attributes
+can be set at once, which for a battery device is the difference between one
+wake-up and two:
+
+```console
+$ gzb write "living room thermo" temperature temperature 2500
+living room thermo (0xCF83) endpoint 1, temperature
+  temperature              = 2500 (int16)
+  !   temperature: read only
+```
+
+A measured value is the device's to report, not yours to set, and it says so
+rather than failing silently. What is about to be written is printed first,
+with the type it will be encoded as, because that is the part a person gets
+wrong.
+
+The wire format carries the type of every value, so a write has to declare one
+before the device has said anything about it. gzb knows the encoding of the
+attributes it can name; for anything else `--type` must say. A device does not
+coerce a wrong guess, it rejects it with `invalid data type`, and answers a
+write to an attribute it will not change with `read only`. Both are reported as
+the device gave them, per attribute, rather than as a single failure.
+
+### Configuring reporting
+
+Reporting is the setting that makes polling unnecessary. `gzb reporting` asks a
+device to send an attribute on its own initiative:
+
+<!--CAPTURE:reporting-->
+
+`--min` throttles a fast-changing value so a noisy last digit cannot flood the
+network. `--max` is the opposite: a heartbeat that proves the device is alive
+when nothing has changed. `--change` is the threshold between them.
+
+The threshold is in the attribute's own units, because that is what travels on
+the wire — a temperature reported in hundredths of a degree takes `50` to mean
+half a degree. Scaling it here would be friendlier for the attributes gzb
+happens to understand and impossible for the rest, so gzb prints back what it
+is about to ask for instead, where a wrong guess by a factor of a hundred is
+visible before the device applies it.
+
+Two things about this are worth saying plainly. The configuration lives in the
+device, not in gzb: it survives gzb restarting, and stays set until something
+changes it. And it is not free — a battery sensor asked for a report every
+second will send one, and will do so until the battery is flat.
+
+`--show` asks a device what it currently holds and changes nothing. It is worth
+knowing about before you need it, because the failure it diagnoses is a silent
+one: an attribute that has been switched off looks exactly like an attribute
+that has nothing new to say. A configure command answers with a status, which
+tells you the device accepted an instruction — not what it now holds, and the
+two come apart precisely when it matters.
+
+`--off` and `--default` are both undo, and they are not the same undo. The
+difference is one field on the wire and it is easy to get backwards:
+
+| | minimum | maximum | effect |
+|---|---|---|---|
+| `--off` | as given | `0xFFFF` | never report this attribute |
+| `--default` | `0xFFFF` | `0xFFFF` | revert to what the device shipped with |
+
+Undoing a configuration you set is `--default`. `--off` silences an attribute,
+which on a sensor that was reporting on its own initiative is a change in its
+own right rather than a restoration — the sort of thing that looks like a fixed
+bug until someone notices the readings stopped.
+
+### Being refused rather than ignored
+
+Every one of these commands waits for a specific answer — a read response, a
+write response, a configure-reporting response. A device that does not
+implement the command at all sends none of them: it sends a ZCL Default
+Response carrying the reason instead. gzb accepts either, so a refusal arrives
+as a refusal rather than as a thirty-second timeout that says nothing.
+
+That distinction matters most on exactly the devices where a timeout is also
+the normal outcome of being asleep, and where the two would otherwise be
+indistinguishable.
+
+A sleepy device is still the hard case, and no amount of framing fixes it:
+
+```console
+$ gzb read "living room thermo" temperature
+gzb: ezsp: timed out waiting for NCP: no reply from 0xCF83 on cluster 0x0402
+```
+
+The request went out and the NCP held it for a sleepy child, but the device did
+not poll its parent before the queue gave up on it — see [indirect transmission
+timeout](#indirect-transmission-timeout). Retrying is what gets through: each
+attempt re-arms the hold, so a request is queued whenever the device next
+wakes.
+
 ## Naming devices
 
 An IEEE address identifies a device but does not say what it is, and a network
@@ -453,10 +588,18 @@ Working and verified against hardware, with a real device paired:
 - ZCL attribute reports decoded into readings, and the device registry
 - ZDO discovery: node and power descriptors, active endpoints, simple
   descriptors, matched by transaction sequence and answering node
+- Attribute reads on demand, including per-attribute refusals, recorded to the
+  registry the same way a report is
+- Attribute writes, including the encoding a device rejects and the read-only
+  attribute it will not change
+- Reading a device's reporting configuration back, which is what tells a
+  configuration that took from one that did not
+- Reporting configuration, accepted by a real sensor and restored to its own
+  default afterwards
 - Device names, and addressing a device by name wherever one is taken
 - Outbound unicast, exercised by the Time cluster responder
 - `probe`, `network`, `permit-join`, `join`, `devices`, `name`, `monitor`,
-  `interview`, `config`
+  `interview`, `read`, `write`, `reporting`, `config`
 - Raw command escape hatch (`ezsp.Conn.Call`) for any unmodelled command
 
 Verified end to end with a SONOFF temperature/humidity sensor
@@ -464,9 +607,16 @@ Verified end to end with a SONOFF temperature/humidity sensor
 temperature, humidity and battery. The ZCL tests are pinned to bytes that
 sensor actually sent.
 
+A second sensor (`A4:C1:38:18:5B:A1:FF:FF`, a SNZB-02B) answered an interview
+and then, caught awake, an attribute read — `23.90 °C` as a raw `2390`, with
+`tolerance` refused as an unsupported attribute — and a write, which it
+declined with `read only`. Both answers went through the same request path a
+caller uses, and the read was recorded in the registry as a reading. It also
+accepted a reporting configuration for its measured temperature, and then a
+revert to its own default — both answered `ok`.
+
 Not built yet:
 
-- Reading and writing attributes on demand, and configuring reporting
 - Cluster commands for lights, plugs and switches
 - Binding management
 - REPL mode
