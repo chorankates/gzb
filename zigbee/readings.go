@@ -3,6 +3,7 @@ package zigbee
 import (
 	"context"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/chorankates/gzb/internal/ezsp"
@@ -152,11 +153,17 @@ func (c *Coordinator) handleIncoming(ctx context.Context, m ezsp.Message) ([]Rea
 			NodeID:     msg.Sender,
 			Cluster:    zcl.ClusterName(msg.APS.Cluster),
 		}
-		if device != nil {
+		if device == nil {
+			// Traffic can arrive before a join callback supplies the stable
+			// IEEE address. Preserve those readings under a temporary NodeID
+			// record; Store.Observe promotes it when identity becomes known.
+			device, _ = c.db.ObserveNodeID(msg.Sender, now)
+		}
+		if device.Identified() {
 			reading.IEEE = device.IEEE
 			reading.DeviceName = device.Describe()
-			device.Record(quantity.Name, quantity.Value, quantity.Unit, now)
 		}
+		device.Record(quantity.Name, quantity.Value, quantity.Unit, now)
 		readings = append(readings, reading)
 	}
 	return readings, nil
@@ -169,7 +176,7 @@ func eventFor(device *store.Device, msg ezsp.IncomingMessage, at time.Time, desc
 		Cluster:     zcl.ClusterName(msg.APS.Cluster),
 		Description: description,
 	}
-	if device != nil {
+	if device != nil && device.Identified() {
 		event.IEEE = device.IEEE
 		event.DeviceName = device.Describe()
 	}
@@ -211,12 +218,12 @@ const (
 )
 
 func timeAttribute(id uint16, now time.Time) zcl.Record {
-	utc := uint64(now.UTC().Sub(zigbeeEpoch) / time.Second)
+	utc := int64(now.UTC().Sub(zigbeeEpoch) / time.Second)
 	_, offsetSeconds := now.Zone()
 
 	switch id {
 	case attrTime:
-		return zcl.Record{ID: id, Type: zcl.TypeUTCTime, Value: utc}
+		return zcl.Record{ID: id, Type: zcl.TypeUTCTime, Value: clampZCLTime(utc)}
 	case attrTimeStatus:
 		return zcl.Record{ID: id, Type: zcl.TypeBitmap8, Value: uint64(timeStatusMaster)}
 	case attrTimeZone:
@@ -226,10 +233,20 @@ func timeAttribute(id uint16, now time.Time) zcl.Record {
 	case attrDstShift:
 		return zcl.Record{ID: id, Type: zcl.TypeInt32, Value: int64(0)}
 	case attrLocalTime:
-		return zcl.Record{ID: id, Type: zcl.TypeUint32, Value: utc + uint64(offsetSeconds)}
+		return zcl.Record{ID: id, Type: zcl.TypeUint32, Value: clampZCLTime(utc + int64(offsetSeconds))}
 	default:
 		return zcl.Record{ID: id, Status: zcl.StatusUnsupportedAttribute}
 	}
+}
+
+func clampZCLTime(seconds int64) uint64 {
+	if seconds < 0 {
+		return 0
+	}
+	if seconds > math.MaxUint32 {
+		return math.MaxUint32
+	}
+	return uint64(seconds)
 }
 
 func serveTimeRead(ctx context.Context, conn connection, msg ezsp.IncomingMessage, frame zcl.Frame) (bool, error) {

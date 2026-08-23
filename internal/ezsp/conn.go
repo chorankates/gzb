@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chorankates/gzb/internal/ash"
@@ -61,6 +62,16 @@ type Conn struct {
 	stackTyp uint8
 
 	readDone chan struct{}
+
+	decodeErrors        atomic.Uint64
+	droppedSubscription atomic.Uint64
+}
+
+// Stats reports protocol errors and messages dropped inside the session.
+type Stats struct {
+	DecodeErrors        uint64
+	DroppedSubscription uint64
+	ASH                 ash.Stats
 }
 
 type subscription struct {
@@ -193,6 +204,15 @@ func (c *Conn) StackVersion() (version uint16, stackType uint8) {
 	return c.stackVer, c.stackTyp
 }
 
+// Stats returns a point-in-time snapshot of connection diagnostics.
+func (c *Conn) Stats() Stats {
+	return Stats{
+		DecodeErrors:        c.decodeErrors.Load(),
+		DroppedSubscription: c.droppedSubscription.Load(),
+		ASH:                 c.link.Stats(),
+	}
+}
+
 // negotiate performs the version handshake that fixes the frame layout.
 func (c *Conn) negotiate(ctx context.Context) error {
 	// The first command is always sent in the legacy layout.
@@ -253,6 +273,7 @@ func (c *Conn) readPump() {
 
 		msg, err := decodeMessage(version, payload)
 		if err != nil {
+			c.decodeErrors.Add(1)
 			continue
 		}
 		if c.trace != nil {
@@ -284,6 +305,7 @@ func (c *Conn) route(msg Message) {
 		case sub.ch <- msg:
 		default:
 			// Drop rather than stall the read pump for every other consumer.
+			c.droppedSubscription.Add(1)
 		}
 	}
 }
@@ -334,7 +356,7 @@ func (c *Conn) command(ctx context.Context, id FrameID, params []byte) ([]byte, 
 	for {
 		select {
 		case msg := <-reply:
-			if msg.ID != id {
+			if !matchesResponse(msg, seq, id) {
 				// A stale reply from an earlier command; keep waiting.
 				continue
 			}
@@ -348,6 +370,10 @@ func (c *Conn) command(ctx context.Context, id FrameID, params []byte) ([]byte, 
 			return nil, ctx.Err()
 		}
 	}
+}
+
+func matchesResponse(msg Message, sequence uint8, id FrameID) bool {
+	return !msg.Callback && msg.Sequence == sequence && msg.ID == id
 }
 
 // Subscribe returns a channel of messages satisfying match, plus a function

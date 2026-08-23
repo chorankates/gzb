@@ -20,6 +20,7 @@ type fakeConnection struct {
 
 	mu             sync.Mutex
 	allowJoins     int
+	permitCalls    int
 	permitDuration uint8
 	sent           int
 	closeOnce      sync.Once
@@ -54,6 +55,7 @@ func (f *fakeConnection) AllowJoins(context.Context) error {
 func (f *fakeConnection) PermitJoining(_ context.Context, duration uint8) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.permitCalls++
 	f.permitDuration = duration
 	return nil
 }
@@ -86,6 +88,29 @@ func TestPermitJoinRejectsUnrepresentableDuration(t *testing.T) {
 		if err := c.PermitJoin(context.Background(), duration); err == nil {
 			t.Errorf("PermitJoin(%s) succeeded, want an error", duration)
 		}
+	}
+}
+
+func TestPermitJoinCanCloseWithoutEnablingPolicy(t *testing.T) {
+	fake := newFakeConnection()
+	c := &Coordinator{conn: fake, db: emptyStore(t)}
+	if err := c.PermitJoin(context.Background(), 0); err != nil {
+		t.Fatalf("PermitJoin: %v", err)
+	}
+	if fake.allowJoins != 0 || fake.permitCalls != 1 || fake.permitDuration != 0 {
+		t.Errorf("join calls = allow %d, permit %d/%d", fake.allowJoins, fake.permitCalls, fake.permitDuration)
+	}
+}
+
+func TestPermitJoinRejectsMissingNetwork(t *testing.T) {
+	fake := newFakeConnection()
+	fake.state = ezsp.NetworkNone
+	c := &Coordinator{conn: fake, db: emptyStore(t)}
+	if err := c.PermitJoin(context.Background(), 60*time.Second); err == nil {
+		t.Fatal("PermitJoin accepted an adapter without a network")
+	}
+	if fake.allowJoins != 0 || fake.permitCalls != 0 {
+		t.Error("join configuration ran without a network")
 	}
 }
 
@@ -170,6 +195,48 @@ func TestReadingsAnswersTimeRequests(t *testing.T) {
 	}
 	for err := range errs {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestReadingsPreservesTrafficBeforeDeviceIdentity(t *testing.T) {
+	fake := newFakeConnection()
+	db := emptyStore(t)
+	c := &Coordinator{conn: fake, db: db}
+	ctx, cancel := context.WithCancel(context.Background())
+	readings, errs := c.Readings(ctx)
+	fake.msgs <- incomingMessage(zcl.ClusterTemperature,
+		[]byte{0x18, 0xC8, 0x0A, 0x00, 0x00, 0x29, 0x54, 0x0B})
+
+	reading := <-readings
+	if reading.IEEE != "" || reading.DeviceName != "" {
+		t.Errorf("unidentified reading exposed placeholder identity: %+v", reading)
+	}
+	device, ok := db.ByNodeID(0x90CB)
+	if !ok || device.Identified() || device.Readings["temperature"].Value != 29 {
+		t.Errorf("placeholder device = %+v, present = %t", device, ok)
+	}
+	cancel()
+	for range readings {
+	}
+	for err := range errs {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestTimeAttributeLocalTimeSupportsNegativeOffset(t *testing.T) {
+	zone := time.FixedZone("UTC-5", -5*60*60)
+	now := time.Date(2026, 8, 16, 12, 30, 0, 0, zone)
+	rec := timeAttribute(attrLocalTime, now)
+	want := uint64(time.Date(2026, 8, 16, 12, 30, 0, 0, time.UTC).Sub(zigbeeEpoch) / time.Second)
+	if rec.Value != want {
+		t.Fatalf("LocalTime = %v, want %d", rec.Value, want)
+	}
+}
+
+func TestTimeAttributeClampsBeforeZigbeeEpoch(t *testing.T) {
+	rec := timeAttribute(attrTime, zigbeeEpoch.Add(-time.Hour))
+	if rec.Value != uint64(0) {
+		t.Fatalf("Time = %v, want 0", rec.Value)
 	}
 }
 
