@@ -14,6 +14,7 @@ import (
 
 	"github.com/chorankates/gzb/internal/ash"
 	"github.com/chorankates/gzb/internal/ezsp"
+	"github.com/chorankates/gzb/zigbee"
 )
 
 const defaultPort = "/dev/ttyUSB0"
@@ -139,6 +140,27 @@ func dial(ctx context.Context, g *globals) (*ezsp.Conn, error) {
 		return nil, fmt.Errorf("%w\n\nIs the dongle plugged in, are you in the `dialout` group, and is nothing else using the port?", err)
 	}
 	return conn, nil
+}
+
+// coordinatorOptions maps the CLI's global connection flags to the public
+// high-level package used by long-running application commands.
+func coordinatorOptions(g *globals, registryPath string) zigbee.Options {
+	opts := zigbee.Options{
+		Path:         g.port,
+		Baud:         g.baud,
+		RegistryPath: registryPath,
+	}
+	if g.trace {
+		opts.TraceEZSP = func(direction, message string) {
+			fmt.Fprintf(os.Stderr, "%s ezsp %s\n", direction, message)
+		}
+	}
+	if g.ashv {
+		opts.TraceASH = func(direction, frame string) {
+			fmt.Fprintf(os.Stderr, "%s ash  %s\n", direction, frame)
+		}
+	}
+	return opts
 }
 
 func emitJSON(v any) error {
