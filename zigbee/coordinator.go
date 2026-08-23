@@ -129,7 +129,8 @@ func Open(ctx context.Context, opts Options) (*Coordinator, error) {
 
 // PermitJoin opens the network to new devices for duration. A zero duration
 // closes it. EZSP represents the duration as whole seconds in one byte, so
-// values must be between zero and 255 seconds.
+// values must be between zero and 255 seconds. The protocol reserves 255
+// seconds to mean open indefinitely.
 func (c *Coordinator) PermitJoin(ctx context.Context, duration time.Duration) error {
 	if duration < 0 || duration > 255*time.Second || duration%time.Second != 0 {
 		return fmt.Errorf("zigbee: permit-join duration must be a whole number of seconds from 0s through 255s")

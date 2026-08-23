@@ -74,6 +74,7 @@ flags:
 
 	enc := json.NewEncoder(os.Stdout)
 	readings, errs := coordinator.Readings(ctx)
+	var terminalErr error
 	for readings != nil || errs != nil {
 		select {
 		case reading, ok := <-readings:
@@ -102,6 +103,7 @@ flags:
 				errs = nil
 				continue
 			}
+			terminalErr = err
 			fmt.Fprintf(os.Stderr, "gzb: %v\n", err)
 		case <-stop:
 			return nil
@@ -112,5 +114,5 @@ flags:
 			return nil
 		}
 	}
-	return nil
+	return terminalErr
 }
