@@ -229,10 +229,10 @@ func ParseSimpleDescriptor(payload []byte) (uint16, SimpleDescriptor, Status, er
 
 // PowerDescriptor reports how a device is powered.
 type PowerDescriptor struct {
-	CurrentMode   uint8 `json:"current_mode"`
-	AvailableSrc  uint8 `json:"available_sources"`
-	CurrentSrc    uint8 `json:"current_source"`
-	CurrentLevel  uint8 `json:"current_level"`
+	CurrentMode  uint8 `json:"current_mode"`
+	AvailableSrc uint8 `json:"available_sources"`
+	CurrentSrc   uint8 `json:"current_source"`
+	CurrentLevel uint8 `json:"current_level"`
 }
 
 // Power source bits, used by both the available and current source fields.
