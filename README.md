@@ -377,7 +377,21 @@ Most of the time asking is unnecessary — a sensor reports on its own and
 when the attribute is one the device never reports, or when the question is
 whether a write took effect.
 
-<!--CAPTURE:read-success-->
+```console
+$ gzb read "outside #2 thermo" temperature
+outside #2 thermo (0x4BCD) endpoint 1, temperature
+  waiting up to 5m0s; a battery device only listens while polling its parent
+  temperature              26.40 °C   (raw 2640, int16)
+  minimum measurable       -4000 (int16)
+  maximum measurable       11500 (int16)
+  tolerance                !  unsupported attribute
+```
+
+Both halves of a measurement are printed. `23.90 °C` is what it means; `2390`
+is what the device actually said, and the scale between them is gzb's claim
+rather than the sensor's. The last two lines are the same attribute read
+succeeding and failing: the sensor knows how cold it can measure, and has no
+opinion on its own tolerance.
 
 Clusters and attributes may be named or given in hex, and the two forms are
 interchangeable — `temperature` and `0x0402` address the same cluster. With no
@@ -413,9 +427,10 @@ can be set at once, which for a battery device is the difference between one
 wake-up and two:
 
 ```console
-$ gzb write "living room thermo" temperature temperature 2500
-living room thermo (0xCF83) endpoint 1, temperature
+$ gzb write "outside #2 thermo" temperature temperature 2500
+outside #2 thermo (0x4BCD) endpoint 1, temperature
   temperature              = 2500 (int16)
+  waiting up to 5m0s; a battery device only listens while polling its parent
   !   temperature: read only
 ```
 
@@ -436,7 +451,16 @@ the device gave them, per attribute, rather than as a single failure.
 Reporting is the setting that makes polling unnecessary. `gzb reporting` asks a
 device to send an attribute on its own initiative:
 
-<!--CAPTURE:reporting-->
+```console
+$ gzb reporting -min 60s -max 1h -change 50 "outside #2 thermo" temperature temperature
+outside #2 thermo (0x4BCD) endpoint 1, temperature
+  temperature              every 1m0s to 1h0m0s, on a change of 50 (0.50 °C)
+  waiting up to 5m0s; a battery device only listens while polling its parent
+  ok  temperature
+```
+
+What is about to be asked for is printed before it is asked, including what the
+raw threshold works out to.
 
 `--min` throttles a fast-changing value so a noisy last digit cannot flood the
 network. `--max` is the opposite: a heartbeat that proves the device is alive
@@ -454,12 +478,27 @@ device, not in gzb: it survives gzb restarting, and stays set until something
 changes it. And it is not free — a battery sensor asked for a report every
 second will send one, and will do so until the battery is flat.
 
-`--show` asks a device what it currently holds and changes nothing. It is worth
-knowing about before you need it, because the failure it diagnoses is a silent
-one: an attribute that has been switched off looks exactly like an attribute
-that has nothing new to say. A configure command answers with a status, which
-tells you the device accepted an instruction — not what it now holds, and the
-two come apart precisely when it matters.
+`--show` asks a device what it currently holds and changes nothing:
+
+```console
+$ gzb reporting -show "outside #2 thermo" temperature temperature
+outside #2 thermo (0x4BCD) endpoint 1, temperature
+  waiting up to 5m0s; a battery device only listens while polling its parent
+  temperature              every 5s to 1h0m0s, on a change of 20 (int16)
+```
+
+It is worth knowing about before you need it, because the failure it diagnoses
+is a silent one. A configure command answers with a status, which tells you the
+device accepted an instruction — not what it now holds. The two come apart
+precisely when it matters, because an attribute that has been switched off
+looks exactly like one that has nothing new to say:
+
+```console
+  temperature              not reported
+```
+
+Reading it back is the only thing that tells those apart, and the only way to
+confirm that an undo undid anything.
 
 `--off` and `--default` are both undo, and they are not the same undo. The
 difference is one field on the wire and it is easy to get backwards:
@@ -486,18 +525,35 @@ That distinction matters most on exactly the devices where a timeout is also
 the normal outcome of being asleep, and where the two would otherwise be
 indistinguishable.
 
-A sleepy device is still the hard case, and no amount of framing fixes it:
+### Asking until something answers
 
-```console
-$ gzb read "living room thermo" temperature
-gzb: ezsp: timed out waiting for NCP: no reply from 0xCF83 on cluster 0x0402
-```
+A sleepy device is the hard case, and the reason one send is never enough is
+worth being precise about. A message for a sleepy child waits in the NCP's
+indirect queue until the device polls its parent, and the NCP discards it after
+[indirect transmission timeout](#indirect-transmission-timeout) seconds —
+thirty, as gzb configures it. Wait longer than that and you are waiting on a
+message that no longer exists. The patience is spent in the wrong place: the
+host is being patient about something the adapter has already given up on.
 
-The request went out and the NCP held it for a sleepy child, but the device did
-not poll its parent before the queue gave up on it — see [indirect transmission
-timeout](#indirect-transmission-timeout). Retrying is what gets through: each
-attempt re-arms the hold, so a request is queued whenever the device next
-wakes.
+So every request repeats itself. `ezsp.Conn.Request` re-sends every ten
+seconds, which is shorter than the queue's own patience on purpose, so that
+copies overlap and one is always live whenever the device finally wakes. The
+reply subscription spans all of them, so an answer cannot land in the gap
+between two attempts. A timeout says how many attempts went out and over how
+long, because "no reply after one attempt" and "no reply after thirty" are
+different problems.
+
+This is why the default timeouts are long — five minutes for an attribute
+command, ninety seconds for each step of an interview. Measured against these
+sensors, reaching one took anywhere from seconds to nine minutes depending on
+where in its sleep cycle the request arrived. A default that gives up first
+turns a working command into one that looks broken. `--timeout` is there for
+when you would rather be told quickly that a device is asleep.
+
+Repeating a message means it may be delivered more than once, so only requests
+that are safe to repeat go through this path. Reading an attribute, writing
+one, and configuring reporting all are: the second copy asks for exactly what
+the first did.
 
 ## Naming devices
 
@@ -575,6 +631,52 @@ the implementation. The ASH vectors (`1A C0 38 BC 7E` for RST, the RSTACK reply
 and its CRC) came off the wire, and the EZSP header sizes were measured against
 EmberZNet 7.4.4.
 
+### Keeping the transcripts honest
+
+The console blocks in this file are output, not illustration, and they are the
+part most able to quietly stop being true — a renamed attribute or a changed
+column is enough. Two things hold them down.
+
+The golden tests in `cmd/gzb` pin the rendering: they run the real printers
+over values two sensors actually returned, and fail if a line changes shape. So
+a block cannot drift from the code without a test noticing.
+
+What those tests cannot show is that a device ever said it, so the commands are
+runnable in one go:
+
+```console
+$ make recapture DEVICE="living room thermo"
+```
+
+That runs the read, the refused write and the reporting question, and writes
+each as a fenced block — to the terminal so a run taking minutes can be
+watched, and to `recapture.md` so the result can be read back from a file
+rather than copied out of a scrollback. `RECAPTURE_OUT` chooses the path. All
+three commands are read-only: the write targets a measured value, which a
+device refuses.
+
+The `$ gzb ...` line in each block is quoted so it can actually be pasted. That
+sounds like a detail until a device is called `outside #2 thermo`, where an
+unquoted `#` starts a shell comment and silently truncates the command.
+
+The reporting configuration is the one capture that changes the device, so it
+is opt-in:
+
+```console
+$ make recapture DEVICE="living room thermo" CONFIGURE=--configure
+```
+
+Before changing anything it reads the configuration the device currently holds,
+and it refuses to continue if that attribute is not being reported — because
+"off" is not the same state as "never configured", and a restore to a state you
+cannot describe is a guess. Afterwards it puts back exactly what it recorded,
+retrying until the device is awake to accept it, and then reads it back, on the
+grounds that a write reporting success is not evidence of what a device holds.
+
+That order — record, change, restore, verify — is not fussiness. Getting it
+wrong once here silenced a working sensor, and the silence was indistinguishable
+from a room whose temperature had not changed.
+
 ## Status
 
 Working and verified against hardware, with a real device paired:
@@ -588,6 +690,8 @@ Working and verified against hardware, with a real device paired:
 - ZCL attribute reports decoded into readings, and the device registry
 - ZDO discovery: node and power descriptors, active endpoints, simple
   descriptors, matched by transaction sequence and answering node
+- Requests that repeat until answered, which is what makes any of the above
+  reach a battery device at all
 - Attribute reads on demand, including per-attribute refusals, recorded to the
   registry the same way a report is
 - Attribute writes, including the encoding a device rejects and the read-only

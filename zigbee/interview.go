@@ -25,7 +25,12 @@ import (
 )
 
 // DefaultInterviewTimeout bounds each individual request an interview makes.
-const DefaultInterviewTimeout = 30 * time.Second
+//
+// Each request is repeated while it waits, so this is a budget for catching a
+// device awake rather than a single throw of the dice. It errs long: an
+// interview that gives up early on a battery sensor records nothing, and
+// nothing is the one result that teaches you least.
+const DefaultInterviewTimeout = 90 * time.Second
 
 // zdoEndpoint is the endpoint ZDO always travels on, at both ends.
 const zdoEndpoint uint8 = 0

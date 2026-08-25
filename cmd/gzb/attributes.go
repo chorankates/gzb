@@ -19,10 +19,16 @@ import (
 // person typed into it. That resolution is the bulk of this file; the queries
 // themselves live in the zigbee package.
 
-// defaultRequestTimeout is how long to wait for an answer. It is generous
-// because a sleepy device does not receive anything until it next polls its
-// parent, and until then a request is not late, merely early.
-const defaultRequestTimeout = 30 * time.Second
+// defaultRequestTimeout is how long to wait for an answer.
+//
+// It is long on purpose. A sleepy device receives nothing until it next polls
+// its parent, so until then a request is not late, merely early — and the
+// measurements behind this number are unambiguous: reaching one of these
+// sensors took anywhere from seconds to nine minutes depending on where in its
+// sleep cycle the request arrived. A default that gives up first turns a
+// working command into one that appears broken, so this errs entirely towards
+// eventually succeeding. Pass -timeout to be less patient.
+const defaultRequestTimeout = 5 * time.Minute
 
 // zclEndpointRange is the range of endpoints an application may use. Endpoint
 // 0 is reserved for ZDO and 241 upwards for Green Power, so addressing either
@@ -97,6 +103,11 @@ flags:
 	ctx, cancel := context.WithTimeout(ctx, *timeout)
 	defer cancel()
 
+	if !g.json {
+		fmt.Printf("%s %s\n", describeTarget(name, target), zigbee.ClusterName(cluster))
+		noteWait(*timeout)
+	}
+
 	values, err := coordinator.ReadAttributes(ctx, target, attrs)
 	if err != nil {
 		return err
@@ -104,7 +115,6 @@ flags:
 	if g.json {
 		return emitJSON(values)
 	}
-	fmt.Printf("%s %s\n", describeTarget(name, target), zigbee.ClusterName(cluster))
 	printAttributeValues(values)
 	return nil
 }
@@ -177,6 +187,7 @@ flags:
 		for _, write := range writes {
 			fmt.Printf("  %-24s = %v (%s)\n", zigbee.AttributeName(cluster, write.ID), write.Value, write.Type)
 		}
+		noteWait(*timeout)
 	}
 
 	results, err := coordinator.WriteAttributes(ctx, target, writes)
@@ -296,6 +307,10 @@ flags:
 	defer cancel()
 
 	if *show {
+		if !g.json {
+			fmt.Printf("%s %s\n", describeTarget(name, target), zigbee.ClusterName(cluster))
+			noteWait(*timeout)
+		}
 		holding, err := coordinator.ReportingConfiguration(ctx, target, attrs)
 		if err != nil {
 			return err
@@ -303,7 +318,6 @@ flags:
 		if g.json {
 			return emitJSON(holding)
 		}
-		fmt.Printf("%s %s\n", describeTarget(name, target), zigbee.ClusterName(cluster))
 		printReportingStatus(holding)
 		return nil
 	}
@@ -313,6 +327,7 @@ flags:
 		for _, config := range configs {
 			fmt.Printf("  %-24s %s\n", zigbee.AttributeName(cluster, config.ID), describeReporting(cluster, config))
 		}
+		noteWait(*timeout)
 	}
 
 	results, err := coordinator.ConfigureReporting(ctx, target, configs)
@@ -489,6 +504,13 @@ func parseValue(t zigbee.DataType, s string) (any, error) {
 
 func describeTarget(name string, target zigbee.Target) string {
 	return fmt.Sprintf("%s (0x%04X) endpoint %d,", name, target.Node, target.Endpoint)
+}
+
+// noteWait says how long the command is prepared to wait, because the honest
+// answer to "why is nothing happening" is that the device is asleep and there
+// is nothing to do but keep asking.
+func noteWait(timeout time.Duration) {
+	fmt.Printf("  waiting up to %s; a battery device only listens while polling its parent\n", timeout)
 }
 
 // describeReporting says back what a reporting configuration asks for, so that
