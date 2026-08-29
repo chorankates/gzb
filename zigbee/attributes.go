@@ -118,6 +118,11 @@ type AttributeValue struct {
 	// because the raw value is what the device actually said.
 	Scaled *float64 `json:"scaled,omitempty"`
 	Unit   string   `json:"unit,omitempty"`
+	// Current marks the values that are a reading — what the device is
+	// measuring or doing now, rather than a limit it was built with or a
+	// statistic it keeps. Only these are written to the registry, and a caller
+	// storing them anywhere else wants the same distinction.
+	Current bool `json:"current,omitempty"`
 	// Status explains why an attribute has no value — most often that the
 	// device does not implement it. It is empty when the read succeeded.
 	Status string `json:"status,omitempty"`
@@ -234,7 +239,7 @@ func (c *Coordinator) ReadAttributes(ctx context.Context, t Target, attrs []uint
 		}
 		if quantity, ok := zcl.Interpret(t.Cluster, record); ok {
 			scaled := quantity.Value
-			value.Scaled, value.Unit = &scaled, quantity.Unit
+			value.Scaled, value.Unit, value.Current = &scaled, quantity.Unit, quantity.Current
 		}
 		values = append(values, value)
 	}
@@ -535,7 +540,11 @@ func (c *Coordinator) recordValues(t Target, values []AttributeValue, now time.T
 	// it does not implement what was asked.
 	device.LastSeen = now
 	for _, value := range values {
-		if value.Scaled == nil {
+		// A registry reading is answered by "what is it now", and every entry
+		// carries a timestamp saying so. The range a sensor can measure and
+		// the coldest it has been are both temperatures, and neither answers
+		// that question, so neither is stored as though it did.
+		if value.Scaled == nil || !value.Current {
 			continue
 		}
 		device.Record(value.Name, *value.Scaled, value.Unit, now)

@@ -16,6 +16,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/chorankates/gzb/internal/zcl"
 )
 
 const unknownIEEEPrefix = "unknown:"
@@ -179,9 +181,27 @@ func Open(path string) (*Store, error) {
 	}
 	for _, device := range s.Devices {
 		migrateLegacyBatteryReading(device)
+		dropRecordedStatistics(device)
 	}
 	s.path = path
 	return s, nil
+}
+
+// dropRecordedStatistics removes readings that were never readings.
+//
+// gzb used to record any attribute it could scale, which swept in the extremes
+// and reference values a display sensor keeps about itself. Stored alongside a
+// timestamp they read as measurements — "humidity 38.3% as of 14:31" — when
+// they are nothing of the kind, and the sensor that reported a minimum warmer
+// than its current temperature is the proof. They are still readable with
+// `gzb read`; what they are not is the answer to what a device is measuring.
+func dropRecordedStatistics(device *Device) {
+	if device == nil || len(device.Readings) == 0 {
+		return
+	}
+	for _, name := range zcl.Statistics() {
+		delete(device.Readings, name)
+	}
 }
 
 // migrateLegacyBatteryReading splits the old ambiguous "battery" registry key

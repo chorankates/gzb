@@ -71,6 +71,10 @@ type Reading struct {
 	Name  string  `json:"name"`
 	Value float64 `json:"value"`
 	Unit  string  `json:"unit"`
+	// Current says whether this is the device's value of that quantity now,
+	// rather than a constant or a statistic it keeps about itself. Both render
+	// the same way; only a current one is a reading.
+	Current bool `json:"current"`
 }
 
 func (r Reading) String() string {
@@ -103,7 +107,7 @@ func Scale(cluster, attr uint16, raw float64) (Reading, bool) {
 	if !ok || spec.scale == 0 {
 		return Reading{}, false
 	}
-	return Reading{Name: spec.name, Value: raw * spec.scale, Unit: spec.unit}, true
+	return Reading{Name: spec.name, Value: raw * spec.scale, Unit: spec.unit, Current: spec.current}, true
 }
 
 // numeric converts a decoded attribute value to a float, if it is a number.

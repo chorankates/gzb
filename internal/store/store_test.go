@@ -325,3 +325,46 @@ func TestUninterviewedDeviceOmitsTheInterviewTimestamp(t *testing.T) {
 		t.Errorf("a device that was never interviewed carries a timestamp:\n%s", data)
 	}
 }
+
+// gzb used to record any attribute it could scale, which swept the extremes a
+// display sensor keeps about itself into the readings map, where a timestamp
+// made them read as measurements. Opening a registry written then has to shed
+// them, or every one of those sensors keeps six wrong readings forever.
+func TestOpenDropsStatisticsRecordedAsReadings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "devices.json")
+	now := time.Now().Round(time.Millisecond)
+	s := &Store{path: path, Devices: map[string]*Device{
+		"sensor": {
+			IEEE: "sensor",
+			Readings: map[string]Reading{
+				"temperature":           {Value: 26.9, Unit: "°C", At: now},
+				"humidity":              {Value: 28, Unit: "%", At: now},
+				"battery percentage":    {Value: 100, Unit: "%", At: now},
+				"temperature maximum":   {Value: 27.9, Unit: "°C", At: now},
+				"temperature minimum":   {Value: 27.1, Unit: "°C", At: now},
+				"temperature reference": {Value: 27.6, Unit: "°C", At: now},
+				"humidity maximum":      {Value: 28.2, Unit: "%", At: now},
+				"humidity minimum":      {Value: 27.2, Unit: "%", At: now},
+				"humidity reference":    {Value: 27.59, Unit: "%", At: now},
+			},
+		},
+	}}
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	readings := reopened.Devices["sensor"].Readings
+	want := []string{"battery percentage", "humidity", "temperature"}
+	if got := reopened.Devices["sensor"].ReadingNames(); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("readings = %v, want %v", got, want)
+	}
+	// The real values are untouched — this drops entries, it does not rewrite
+	// the ones that belong there.
+	if got := readings["temperature"]; got.Value != 26.9 || got.Unit != "°C" {
+		t.Errorf("temperature = %+v, want 26.9 °C", got)
+	}
+}

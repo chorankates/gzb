@@ -29,6 +29,17 @@ type attributeSpec struct {
 	// meaningless number.
 	unit  string
 	scale float64
+	// current marks an attribute whose value is what the device is measuring
+	// or doing right now. Standing for a physical quantity is not the same
+	// thing: the coldest a sensor has been since it booted is a temperature in
+	// degrees, and it is not the temperature.
+	//
+	// Both kinds are worth rendering, which is why the distinction is separate
+	// from the scale. Only a current one belongs in the registry's readings,
+	// where every entry carries a timestamp that reads as "as of". Marking it
+	// positively means a new scaled attribute has to opt in to being recorded,
+	// rather than silently arriving there.
+	current bool
 }
 
 // attributes maps (cluster, attribute) to what gzb knows about it.
@@ -49,17 +60,17 @@ var attributes = map[[2]uint16]attributeSpec{
 	{ClusterBasic, 0x0011}: {name: "physical environment", typ: TypeEnum8},
 	{ClusterBasic, 0x0012}: {name: "device enabled", typ: TypeBool},
 
-	{ClusterPowerConfiguration, 0x0020}: {name: "battery voltage", typ: TypeUint8, unit: "V", scale: 0.1},
-	{ClusterPowerConfiguration, 0x0021}: {name: "battery percentage", typ: TypeUint8, unit: "%", scale: 0.5},
+	{ClusterPowerConfiguration, 0x0020}: {name: "battery voltage", typ: TypeUint8, unit: "V", scale: 0.1, current: true},
+	{ClusterPowerConfiguration, 0x0021}: {name: "battery percentage", typ: TypeUint8, unit: "%", scale: 0.5, current: true},
 
 	{ClusterIdentify, 0x0000}: {name: "identify time", typ: TypeUint16},
 
-	{ClusterOnOff, 0x0000}: {name: "on/off", typ: TypeBool, scale: 1},
+	{ClusterOnOff, 0x0000}: {name: "on/off", typ: TypeBool, scale: 1, current: true},
 	{ClusterOnOff, 0x4001}: {name: "on time", typ: TypeUint16},
 	{ClusterOnOff, 0x4002}: {name: "off wait time", typ: TypeUint16},
 	{ClusterOnOff, 0x4003}: {name: "startup on/off", typ: TypeEnum8},
 
-	{ClusterLevelControl, 0x0000}: {name: "level", typ: TypeUint8, scale: 1},
+	{ClusterLevelControl, 0x0000}: {name: "level", typ: TypeUint8, scale: 1, current: true},
 	{ClusterLevelControl, 0x0010}: {name: "transition time", typ: TypeUint16},
 	{ClusterLevelControl, 0x0011}: {name: "on level", typ: TypeUint8},
 
@@ -75,20 +86,20 @@ var attributes = map[[2]uint16]attributeSpec{
 	{ClusterColorControl, 0x0007}: {name: "color temperature", typ: TypeUint16},
 	{ClusterColorControl, 0x0008}: {name: "color mode", typ: TypeEnum8},
 
-	{ClusterIlluminance, 0x0000}: {name: "illuminance", typ: TypeUint16, unit: "lx", scale: 1},
+	{ClusterIlluminance, 0x0000}: {name: "illuminance", typ: TypeUint16, unit: "lx", scale: 1, current: true},
 
-	{ClusterTemperature, 0x0000}: {name: "temperature", typ: TypeInt16, unit: "°C", scale: 0.01},
+	{ClusterTemperature, 0x0000}: {name: "temperature", typ: TypeInt16, unit: "°C", scale: 0.01, current: true},
 	{ClusterTemperature, 0x0001}: {name: "minimum measurable", typ: TypeInt16},
 	{ClusterTemperature, 0x0002}: {name: "maximum measurable", typ: TypeInt16},
 	{ClusterTemperature, 0x0003}: {name: "tolerance", typ: TypeUint16},
 
-	{ClusterPressure, 0x0000}: {name: "pressure", typ: TypeInt16, unit: "kPa", scale: 0.1},
+	{ClusterPressure, 0x0000}: {name: "pressure", typ: TypeInt16, unit: "kPa", scale: 0.1, current: true},
 
-	{ClusterRelativeHumidity, 0x0000}: {name: "humidity", typ: TypeUint16, unit: "%", scale: 0.01},
+	{ClusterRelativeHumidity, 0x0000}: {name: "humidity", typ: TypeUint16, unit: "%", scale: 0.01, current: true},
 	{ClusterRelativeHumidity, 0x0001}: {name: "minimum measurable", typ: TypeUint16},
 	{ClusterRelativeHumidity, 0x0002}: {name: "maximum measurable", typ: TypeUint16},
 
-	{ClusterOccupancySensing, 0x0000}: {name: "occupancy", typ: TypeBitmap8, scale: 1},
+	{ClusterOccupancySensing, 0x0000}: {name: "occupancy", typ: TypeBitmap8, scale: 1, current: true},
 	{ClusterOccupancySensing, 0x0001}: {name: "occupancy sensor type", typ: TypeEnum8},
 
 	{ClusterIASZone, 0x0000}: {name: "zone state", typ: TypeEnum8},
@@ -105,6 +116,10 @@ var attributes = map[[2]uint16]attributeSpec{
 	// hundredths on their manufacturer cluster. The exact time window is
 	// firmware-dependent. The third value in each group is documented only as
 	// a reference value, so do not misrepresent it as current or average.
+	//
+	// None of them is current, and a sensor proves it: one of these reported a
+	// temperature of 26.90 °C alongside a minimum of 27.10 °C. Whatever window
+	// that minimum covers, it is not the one the reading belongs to.
 	{ClusterSonoff, 0x2008}: {name: "temperature maximum", typ: TypeInt16, unit: "°C", scale: 0.01},
 	{ClusterSonoff, 0x2009}: {name: "temperature minimum", typ: TypeInt16, unit: "°C", scale: 0.01},
 	{ClusterSonoff, 0x200A}: {name: "temperature reference", typ: TypeInt16, unit: "°C", scale: 0.01},
@@ -132,6 +147,24 @@ func AttributeType(cluster, attr uint16) (DataType, bool) {
 		return 0, false
 	}
 	return spec.typ, true
+}
+
+// Statistics lists the quantity names gzb renders as measurements but that are
+// never a device's current value of anything — the extremes and reference
+// values a display sensor keeps for its own screen.
+//
+// It exists so a registry written before that distinction was drawn can drop
+// the entries it should never have recorded. Deriving it from the attribute
+// table is what keeps the two from disagreeing later.
+func Statistics() []string {
+	var names []string
+	for _, spec := range attributes {
+		if spec.scale != 0 && !spec.current {
+			names = append(names, spec.name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // KnownAttributes lists the attributes gzb knows on a cluster, in ID order.

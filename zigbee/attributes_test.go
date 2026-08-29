@@ -67,6 +67,10 @@ func zclResponder(dest uint16, aps ezsp.APSFrame, payload []byte) (ezsp.Incoming
 			switch [2]uint16{aps.Cluster, attr} {
 			case [2]uint16{0x0402, 0x0000}:
 				records = append(records, 0x00, 0x29, 0x54, 0x0B) // 2900, an int16
+			case [2]uint16{0xFC11, 0x2009}:
+				// The coldest this sensor remembers being. It is a
+				// temperature, and it is not the temperature.
+				records = append(records, 0x00, 0x29, 0x96, 0x0A) // 2710, an int16
 			case [2]uint16{0x0000, 0x0004}:
 				records = append(records, 0x00, 0x42, 0x06, 'S', 'O', 'N', 'O', 'F', 'F')
 			case [2]uint16{0x0000, 0x0005}:
@@ -612,5 +616,69 @@ func TestReportingConfigurationChangesNothing(t *testing.T) {
 		if request.payload[2] == cmdConfigureReporting {
 			t.Error("reading the configuration sent a configure command")
 		}
+	}
+}
+
+// A registry reading answers "what is it now". A device-kept extreme is a
+// temperature that answers a different question, so reading one must not file
+// it under the quantity it resembles — while still rendering as that quantity,
+// which is the whole reason the two were confused in the first place.
+func TestReadAttributesDoesNotRecordAStatisticAsAReading(t *testing.T) {
+	c, _, db := zclCoordinator(t, zclResponder)
+	device, _ := db.Observe("A4:C1:38:18:56:07:FF:FF", zclNode, time.Time{})
+
+	target := Target{Node: zclNode, Endpoint: 1, Cluster: 0xFC11}
+	values, err := c.ReadAttributes(context.Background(), target, []uint16{0x2009})
+	if err != nil {
+		t.Fatalf("ReadAttributes: %v", err)
+	}
+	if len(values) != 1 {
+		t.Fatalf("values = %+v, want one", values)
+	}
+	got := values[0]
+	if got.Name != "temperature minimum" {
+		t.Errorf("name = %q, want temperature minimum", got.Name)
+	}
+	if got.Scaled == nil || *got.Scaled < 27.09 || *got.Scaled > 27.11 || got.Unit != "°C" {
+		t.Errorf("scaled = %v %s, want 27.10 °C", got.Scaled, got.Unit)
+	}
+	if got.Current {
+		t.Error("a device-kept minimum is marked as the device's current value")
+	}
+	if len(device.Readings) != 0 {
+		t.Errorf("readings = %+v, want none: a minimum is not a measurement of now", device.Readings)
+	}
+}
+
+// The same distinction has to hold for a report, which arrives by a different
+// path. A statistic a device volunteers is still worth seeing, so it surfaces
+// as an event rather than being dropped.
+func TestReportedStatisticIsAnEventRatherThanAReading(t *testing.T) {
+	fake := newFakeConnection()
+	db := emptyStore(t)
+	device, _ := db.Observe("A4:C1:38:18:56:07:FF:FF", 0x90CB, time.Now())
+
+	var events []Event
+	c := &Coordinator{conn: fake, db: db, opts: Options{
+		OnUnhandled: func(e Event) { events = append(events, e) },
+	}}
+
+	// Report attributes: 0x2009 on the SONOFF cluster, an int16 of 2710.
+	msg := incomingMessage(0xFC11, []byte{0x18, 0x01, 0x0A, 0x09, 0x20, 0x29, 0x96, 0x0A})
+	readings, err := c.handleIncoming(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("handleIncoming: %v", err)
+	}
+	if len(readings) != 0 {
+		t.Errorf("readings = %+v, want none", readings)
+	}
+	if len(device.Readings) != 0 {
+		t.Errorf("registry readings = %+v, want none", device.Readings)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %+v, want the statistic reported as one", events)
+	}
+	if !strings.Contains(events[0].Description, "temperature minimum") {
+		t.Errorf("event described as %q, want it to name the statistic", events[0].Description)
 	}
 }

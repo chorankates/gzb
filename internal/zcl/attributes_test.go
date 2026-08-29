@@ -310,12 +310,10 @@ func TestInterpretedNamesAreTheRegistryKeys(t *testing.T) {
 		"temperature": true, "humidity": true, "pressure": true,
 		"illuminance": true, "battery voltage": true, "battery percentage": true,
 		"occupancy": true, "on/off": true, "level": true,
-		"temperature maximum": true, "temperature minimum": true, "temperature reference": true,
-		"humidity maximum": true, "humidity minimum": true, "humidity reference": true,
 	}
 	got := make(map[string]bool)
 	for key, spec := range attributes {
-		if spec.scale == 0 {
+		if spec.scale == 0 || !spec.current {
 			continue
 		}
 		got[spec.name] = true
@@ -326,6 +324,58 @@ func TestInterpretedNamesAreTheRegistryKeys(t *testing.T) {
 	for name := range want {
 		if !got[name] {
 			t.Errorf("nothing interprets as %q any more; readings stored under it are orphaned", name)
+		}
+	}
+}
+
+// Statistics render as measurements and are not measurements of anything now.
+// Keeping the two apart is what stops "the coldest this sensor has been" being
+// filed under the same key as "the temperature", which is where it was going
+// before the distinction existed.
+func TestStatisticsAreScaledButNotCurrent(t *testing.T) {
+	reading, ok := Scale(ClusterSonoff, 0x2009, 2710)
+	if !ok {
+		t.Fatal("temperature minimum has no interpretation")
+	}
+	if reading.Name != "temperature minimum" || reading.Unit != "°C" {
+		t.Errorf("2710 raw = %+v, want a temperature minimum in °C", reading)
+	}
+	if reading.Value < 27.09 || reading.Value > 27.11 {
+		t.Errorf("value = %v, want 27.10", reading.Value)
+	}
+	if reading.Current {
+		t.Error("a device-kept minimum is claiming to be the current value")
+	}
+
+	now, ok := Scale(ClusterTemperature, 0x0000, 2260)
+	if !ok || !now.Current {
+		t.Errorf("the temperature attribute = %+v, want a current reading", now)
+	}
+}
+
+// Statistics is what a registry consults to drop entries it should not hold,
+// so it has to name every scaled attribute that is not current, and nothing
+// that is.
+func TestStatisticsNamesEveryScaledNonCurrentAttribute(t *testing.T) {
+	listed := make(map[string]bool)
+	for _, name := range Statistics() {
+		listed[name] = true
+	}
+	for key, spec := range attributes {
+		if spec.scale == 0 {
+			continue
+		}
+		if spec.current == listed[spec.name] {
+			t.Errorf("cluster 0x%04X attribute 0x%04X is %q with current=%v, but Statistics lists it: %v",
+				key[0], key[1], spec.name, spec.current, listed[spec.name])
+		}
+	}
+	for _, name := range []string{
+		"temperature maximum", "temperature minimum", "temperature reference",
+		"humidity maximum", "humidity minimum", "humidity reference",
+	} {
+		if !listed[name] {
+			t.Errorf("Statistics does not name %q, so a registry holding one keeps it forever", name)
 		}
 	}
 }

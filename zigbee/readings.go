@@ -142,6 +142,14 @@ func (c *Coordinator) handleIncoming(ctx context.Context, m ezsp.Message) ([]Rea
 			c.unhandled(eventFor(device, msg, now, description))
 			continue
 		}
+		if !quantity.Current {
+			// A device may volunteer a statistic it keeps about itself — the
+			// warmest it has been, the range it can measure. That is worth
+			// seeing and is not a reading, so it is reported as what it is
+			// rather than filed under the quantity it resembles.
+			c.unhandled(eventFor(device, msg, now, quantity.String()))
+			continue
+		}
 
 		reading := Reading{
 			Capability: quantity.Name,
