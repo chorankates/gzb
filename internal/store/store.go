@@ -48,7 +48,16 @@ type Device struct {
 	Model        string     `json:"model,omitempty"`
 	PowerSource  string     `json:"power_source,omitempty"`
 	Endpoints    []Endpoint `json:"endpoints,omitempty"`
-	Interviewed  time.Time  `json:"interviewed,omitempty"`
+	Interviewed  time.Time  `json:"interviewed,omitzero"`
+	// InheritedFrom names the device these interview fields were copied from,
+	// when they were copied from an identical sibling rather than asked of this
+	// device. It is empty for a device that answered for itself.
+	//
+	// The distinction has to survive in the record. Inherited structure is a
+	// deduction — that two devices reporting the same model are built the same
+	// — and a deduction that turns out to be wrong is only findable if it does
+	// not look exactly like an observation.
+	InheritedFrom string `json:"inherited_from,omitempty"`
 }
 
 // Endpoint is one endpoint discovered by an interview.
@@ -271,6 +280,44 @@ func (s *Store) ByNodeID(id uint16) (*Device, bool) {
 		}
 	}
 	return nil, false
+}
+
+// PeerOfModel finds an interviewed device of the same make and model as the
+// one at excludeIEEE, which is left out of the search.
+//
+// Structure is a property of a model rather than of a unit. Two devices that
+// report the same manufacturer and model came off the same line with the same
+// endpoints and the same clusters on them, so one of them that has been
+// interviewed is an answer key for the rest — and for a battery device that is
+// the difference between one round trip and five.
+//
+// Only a device that answered for itself qualifies. Inheriting from an
+// inherited record would let a single bad match copy itself across the
+// registry, with nothing left anywhere pointing at a device that was actually
+// asked. A record keyed by network address is excluded for the same reason:
+// its identity is a placeholder that a later join will replace, and a
+// reference to it would not survive that.
+func (s *Store) PeerOfModel(manufacturer, model, excludeIEEE string) (*Device, bool) {
+	if model == "" {
+		return nil, false
+	}
+	var best *Device
+	for _, d := range s.Devices {
+		switch {
+		case d.IEEE == excludeIEEE, !d.Identified(),
+			d.InheritedFrom != "",
+			d.Manufacturer != manufacturer, d.Model != model,
+			len(d.Endpoints) == 0, d.Interviewed.IsZero():
+			continue
+		}
+		// The most recent interview wins, and the address breaks a tie, so the
+		// same registry always nominates the same device.
+		if best == nil || d.Interviewed.After(best.Interviewed) ||
+			(d.Interviewed.Equal(best.Interviewed) && d.IEEE < best.IEEE) {
+			best = d
+		}
+	}
+	return best, best != nil
 }
 
 // Remove deletes a device from the registry.

@@ -3,6 +3,7 @@ package store
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -208,5 +209,119 @@ func TestListOrdersByMostRecentlySeen(t *testing.T) {
 	list := s.List()
 	if len(list) != 2 || list[0].IEEE != "00:00:00:00:00:00:00:02" {
 		t.Errorf("List = %v, want the most recently seen device first", list)
+	}
+}
+
+// peer builds an interviewed record of the given model, the kind an identical
+// sibling is entitled to copy.
+func peer(s *Store, ieee, model string, interviewed time.Time) *Device {
+	d, _ := s.Observe(ieee, 0x1000, interviewed)
+	d.Manufacturer = "eWeLink"
+	d.Model = model
+	d.Endpoints = []Endpoint{{ID: 1, Input: []uint16{0x0000, 0x0402}}}
+	d.Interviewed = interviewed
+	return d
+}
+
+func TestPeerOfModelFindsAnInterviewedSibling(t *testing.T) {
+	s := &Store{Devices: map[string]*Device{}}
+	now := time.Now()
+	want := peer(s, "A4:C1:38:18:AA:AA:AA:AA", "TH01", now)
+	peer(s, "A4:C1:38:18:CC:CC:CC:CC", "SNZB-04", now) // a different model
+
+	got, ok := s.PeerOfModel("eWeLink", "TH01", "A4:C1:38:18:56:07:FF:FF")
+	if !ok || got != want {
+		t.Fatalf("peer = %+v, %t; want the TH01", got, ok)
+	}
+	if _, ok := s.PeerOfModel("eWeLink", "SNZB-02D", "A4:C1:38:18:56:07:FF:FF"); ok {
+		t.Error("a model nothing on the network reports found a peer")
+	}
+	// Model strings are not unique across vendors, so the maker has to agree.
+	if _, ok := s.PeerOfModel("Tuya", "TH01", "A4:C1:38:18:56:07:FF:FF"); ok {
+		t.Error("another vendor's TH01 was accepted as the same device")
+	}
+	// A device is not its own answer key.
+	if _, ok := s.PeerOfModel("eWeLink", "TH01", want.IEEE); ok {
+		t.Error("a device was offered itself to inherit from")
+	}
+}
+
+// Only a device that answered for itself may be copied. Inheriting from an
+// inherited record would let one bad match spread with nothing left pointing at
+// a device that was actually asked.
+func TestPeerOfModelRequiresAFirsthandInterview(t *testing.T) {
+	now := time.Now()
+	const asking = "A4:C1:38:18:56:07:FF:FF"
+
+	secondhand := &Store{Devices: map[string]*Device{}}
+	peer(secondhand, "A4:C1:38:18:AA:AA:AA:AA", "TH01", now).InheritedFrom = "A4:C1:38:18:BB:BB:BB:BB"
+	if _, ok := secondhand.PeerOfModel("eWeLink", "TH01", asking); ok {
+		t.Error("an inherited record was offered as an answer key")
+	}
+
+	// A record keyed by network address has a placeholder identity that a later
+	// join replaces, so a reference to it would not survive.
+	placeholder := &Store{Devices: map[string]*Device{}}
+	unknown, _ := placeholder.ObserveNodeID(0x90CB, now)
+	unknown.Manufacturer, unknown.Model = "eWeLink", "TH01"
+	unknown.Endpoints = []Endpoint{{ID: 1}}
+	unknown.Interviewed = now
+	if _, ok := placeholder.PeerOfModel("eWeLink", "TH01", asking); ok {
+		t.Error("a placeholder record was offered as an answer key")
+	}
+
+	// Structure is the point; a record that has a model but no endpoints has
+	// nothing worth copying.
+	thin := &Store{Devices: map[string]*Device{}}
+	bare := peer(thin, "A4:C1:38:18:AA:AA:AA:AA", "TH01", now)
+	bare.Endpoints = nil
+	if _, ok := thin.PeerOfModel("eWeLink", "TH01", asking); ok {
+		t.Error("a record with no endpoints was offered as an answer key")
+	}
+
+	// An empty model matches everything, which is exactly what it must not do.
+	blank := &Store{Devices: map[string]*Device{}}
+	peer(blank, "A4:C1:38:18:AA:AA:AA:AA", "", now)
+	if _, ok := blank.PeerOfModel("eWeLink", "", asking); ok {
+		t.Error("a device that never said what it is was matched by model")
+	}
+}
+
+// The same registry must always nominate the same device, or two runs of the
+// same command would disagree about where a record came from.
+func TestPeerOfModelPicksTheSameDeviceEveryTime(t *testing.T) {
+	s := &Store{Devices: map[string]*Device{}}
+	now := time.Now()
+	peer(s, "A4:C1:38:18:AA:AA:AA:AA", "TH01", now.Add(-time.Hour))
+	newest := peer(s, "A4:C1:38:18:BB:BB:BB:BB", "TH01", now)
+	peer(s, "A4:C1:38:18:CC:CC:CC:CC", "TH01", now.Add(-2*time.Hour))
+
+	for range 10 {
+		got, ok := s.PeerOfModel("eWeLink", "TH01", "A4:C1:38:18:56:07:FF:FF")
+		if !ok || got != newest {
+			t.Fatalf("peer = %+v, want the most recently interviewed", got)
+		}
+	}
+}
+
+// Interviewed is a struct, so it needs omitzero rather than omitempty to stay
+// out of the file. A registry full of "0001-01-01T00:00:00Z" reads as though
+// every device were interviewed at the dawn of the calendar.
+func TestUninterviewedDeviceOmitsTheInterviewTimestamp(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(filepath.Join(dir, "devices.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Observe("A4:C1:38:18:56:07:FF:FF", 0x90CB, time.Now())
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(s.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "interviewed") {
+		t.Errorf("a device that was never interviewed carries a timestamp:\n%s", data)
 	}
 }

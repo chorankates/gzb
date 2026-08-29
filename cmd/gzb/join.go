@@ -315,6 +315,15 @@ flags:
 		}
 		fmt.Println(deviceHeading(d))
 		fmt.Printf("  %s, last seen %s\n", kind, d.LastSeen.Format(time.RFC3339))
+		if d.InheritedFrom != "" {
+			// A record deduced from an identical device must not read like one
+			// the device gave itself.
+			from := d.InheritedFrom
+			if peer, ok := db.Get(d.InheritedFrom); ok {
+				from = peer.Describe()
+			}
+			fmt.Printf("  endpoints inherited from %s, which has the same model\n", from)
+		}
 		for _, name := range d.ReadingNames() {
 			r := d.Readings[name]
 			fmt.Printf("  %-14s %-12s (%s)\n", name, r, r.At.Format(time.RFC3339))

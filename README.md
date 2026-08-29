@@ -223,7 +223,11 @@ always sufficient, and the ceiling is the point: a device that polls less often
 than every thirty seconds still cannot be reached on demand, whatever the host
 does. Measured here, the SONOFF sensors are in that category — they sleep
 through a 30-second hold and a 45-second wait — so the only reliable moment to
-interview one remains while it is awake, immediately after it joins.
+interview one remains while it is awake, immediately after it joins. The way
+around that is to need fewer answers from it: a second unit of a model already
+interviewed [inherits the
+first one's](#not-asking-a-question-already-answered), and has to be caught
+awake once rather than five times.
 
 ### Trust-centre policy
 
@@ -308,11 +312,11 @@ a description, and `gzb interview` asks the whole set of questions:
 ```console
 $ gzb interview 0x0000
 Interviewing 0x0000 (0x0000)
+  manufacturer and model...
   node descriptor...
   power descriptor...
   active endpoints...
   endpoint 1 descriptor...
-  manufacturer and model...
 
   coordinator, mains, always listening
   Manufacturer code 0xABCD
@@ -323,13 +327,20 @@ Interviewing 0x0000 (0x0000)
     out  basic, power, identify, groups, scenes, on/off, level, ...
 ```
 
-The questions build on each other. The **node descriptor** says what kind of
-node this is and whether it is reachable on demand. The **active endpoint
-list** says where to address anything else, because an endpoint is where
-clusters live. A **simple descriptor** per endpoint says what that endpoint
-implements. Only then is there an endpoint to read the Basic cluster from,
-which is the one part of an interview that produces a name a person would
-recognise.
+**Manufacturer and model** come first, from the Basic cluster. It is the one
+answer that cannot be worked out from any other, the only one that produces a
+name a person would recognise, and — as the next section explains — the one
+that can make the rest unnecessary. Reading it has to guess an endpoint, since
+the endpoint list is exactly what has not been asked for yet; endpoint 1 is
+where a device with a single endpoint puts everything.
+
+The remaining questions build on each other. The **node descriptor** says what
+kind of node this is and whether it is reachable on demand. The **active
+endpoint list** says where to address anything else, because an endpoint is
+where clusters live. A **simple descriptor** per endpoint says what that
+endpoint implements. If the opening guess missed, the endpoint list has now
+settled where the Basic cluster really is, and the model is asked for again —
+a guess that missed is not a fault of the device, so it is not reported as one.
 
 Every request carries a transaction sequence number, and its response echoes
 it; the reply arrives on the request's cluster with bit 15 set. Both halves are
@@ -354,6 +365,7 @@ you something, so a failed step is recorded and the interview continues:
 ```console
 $ gzb interview "bedroom thermo"
 Interviewing bedroom thermo (0x90CB)
+  manufacturer and model...
   node descriptor...
   power descriptor...
   active endpoints...
@@ -366,6 +378,79 @@ Interviewing bedroom thermo (0x90CB)
 Discovery does not need the readings loop stopped, which matters for exactly
 this reason: the moment a sleepy device is worth interviewing is while it is
 awake and reporting.
+
+### Not asking a question already answered
+
+Identical devices are identical. A network is usually built from a handful of
+models bought a few at a time, and every unit of a model came off the same line
+with the same endpoints carrying the same clusters. Asking each of them
+separately is asking the same question over and over and waiting a long time
+for the same answer.
+
+So once one unit has been interviewed, the next only has to say what it is:
+
+```console
+$ gzb interview "outside #1 thermo"
+Interviewing outside #1 thermo (0x584D)
+  manufacturer and model...
+
+  eWeLink TH01
+  Same model as living room thermo, so everything below is that device's answers
+  end device, battery, sleepy
+  Powered by disposable battery
+
+  Endpoint 1  profile 0x0104  device 0x0302
+    in   basic, power configuration, identify, temperature, humidity, ...
+    out  ota upgrade, time
+```
+
+One round trip instead of five. On a sleepy sensor that answers in its own
+time, that is the difference between minutes and most of an hour — and with
+`--all` it means one device answers properly and the rest fall in behind it.
+
+Inherited structure is marked as inherited, in the registry as well as in that
+output. The claim being made is a deduction — *these two report the same model,
+so they are built the same* — and a deduction that turns out to be wrong is
+only findable if it does not look exactly like an observation. For the same
+reason a record only inherits from a device that answered for itself, never
+from another inherited record: one bad match would otherwise copy itself across
+the registry with nothing left pointing at a device that was actually asked.
+
+A device that has answered for itself is never given a sibling's answers
+instead, and `--full` asks everything regardless — which is how an inherited
+record is promoted to a firsthand one:
+
+```console
+$ gzb interview --full "outside #1 thermo"
+```
+
+### Picking up where the last run stopped
+
+Interviewing a network of sleepy devices is long enough that something will go
+wrong partway through — a device that never wakes, an NCP that stops answering
+for a moment, a Ctrl-C. None of that should cost the answers already collected,
+so each one is written to the registry as it arrives rather than at the end,
+one device failing does not end the run, and `--all` means *every device
+without an answer* rather than every device:
+
+```console
+$ gzb interview --all
+7 device(s) already interviewed, skipping; --full asks them again.
+
+Interviewing bathroom thermo (0x2C1B)
+...
+gzb: door1: zigbee: reading network state: ezsp: timed out waiting for NCP: no response to networkState
+
+3 device(s) interviewed, 2 of them from an identical device; 1 could not be reached.
+Re-run to try those again; what succeeded is already recorded.
+```
+
+Re-running is then cheap: the seven that answered are not asked again, and
+neither are the three that just did. That is the whole difference between
+`--all` and `--full` — `--all` finishes the job, `--full` starts it over.
+
+A device named on the command line is always asked, whatever the registry
+already holds. Naming it is the request.
 
 ## Reading and writing attributes
 
@@ -412,9 +497,11 @@ the same vocabulary, and the position on the command line is what distinguishes
 them.
 
 The endpoint comes from the registry: whichever endpoint the interview found
-that cluster on. A device that has never been interviewed falls back to
-endpoint 1, where a device with only one endpoint puts everything, and
-`--endpoint` overrides both.
+that cluster on — or the endpoint an identical device's interview found it on,
+which is most of the value of [inheriting a
+sibling's answers](#not-asking-a-question-already-answered). A device the
+registry knows nothing about falls back to endpoint 1, where a device with only
+one endpoint puts everything, and `--endpoint` overrides both.
 
 Values that gzb recognises as measurements are written to the registry exactly
 as a report would be. A reading is a reading whether the device volunteered it

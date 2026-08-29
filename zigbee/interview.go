@@ -102,6 +102,13 @@ type Description struct {
 	Endpoints    []Endpoint       `json:"endpoints,omitempty"`
 	At           time.Time        `json:"at"`
 
+	// InheritedFrom and InheritedFromName identify the device this
+	// description's structure was copied from, when the device reported a
+	// model already interviewed on another unit and was not asked again. They
+	// are empty when the device answered every question itself.
+	InheritedFrom     string `json:"inherited_from,omitempty"`
+	InheritedFromName string `json:"inherited_from_name,omitempty"`
+
 	// Problems records what could not be asked. A device that answers some
 	// questions and sleeps through the rest has still told you something, so
 	// a failed step is recorded here rather than abandoning the interview.
@@ -117,6 +124,10 @@ type InterviewOptions struct {
 	// An interview of a sleepy device can spend a long time waiting with
 	// nothing to show, which is worth reporting.
 	Progress func(step string)
+	// Full asks the device every question even when an identical device has
+	// already answered them. It is how a record that was filled in by
+	// inheritance is replaced with one the device gave itself.
+	Full bool
 }
 
 // nextSequence returns the next transaction sequence number.
@@ -258,6 +269,14 @@ func (c *Coordinator) SimpleDescriptor(ctx context.Context, node uint16, endpoin
 // Interview asks a device everything: its node and power descriptors, its
 // endpoints, what each endpoint implements, and its manufacturer and model.
 //
+// The manufacturer and model come first, because they are the one answer that
+// cannot be deduced and the one that makes the rest unnecessary. A device
+// reporting a model that another unit has already been interviewed about
+// inherits that unit's structure instead of being asked again — one round trip
+// rather than five, which on a sleepy battery sensor is minutes rather than
+// most of an hour. Inherited records say so, and InterviewOptions.Full asks
+// everything regardless.
+//
 // Individual failures are tolerated. A sleepy device may answer some questions
 // and sleep through others, and a partial answer is far more useful than none,
 // so a failed step is recorded in Problems and the interview continues. An
@@ -265,7 +284,8 @@ func (c *Coordinator) SimpleDescriptor(ctx context.Context, node uint16, endpoin
 //
 // What the interview learns is written to the device registry for devices the
 // registry already knows, so later output can name a device by its model
-// rather than its address. Call Close to persist that.
+// rather than its address. It is saved before this returns, so an answer
+// survives whatever happens to the interview after it.
 func (c *Coordinator) Interview(ctx context.Context, node uint16, opts InterviewOptions) (Description, error) {
 	if err := c.checkOpen(); err != nil {
 		return Description{}, err
@@ -287,14 +307,43 @@ func (c *Coordinator) Interview(ctx context.Context, node uint16, opts Interview
 	}
 
 	desc := Description{NodeID: node, At: time.Now()}
-	step := func(name string, ask func(context.Context) error) {
+	attempt := func(name string, ask func(context.Context) error) error {
 		if opts.Progress != nil {
 			opts.Progress(name)
 		}
 		stepCtx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
-		if err := ask(stepCtx); err != nil {
+		return ask(stepCtx)
+	}
+	step := func(name string, ask func(context.Context) error) {
+		if err := attempt(name, ask); err != nil {
 			desc.Problems = append(desc.Problems, err.Error())
+		}
+	}
+
+	// The cheap question goes first. A network is usually built from a few
+	// models bought a handful at a time, and every unit of a model has the
+	// same endpoints carrying the same clusters — so when this answer names a
+	// model already interviewed on another unit, every expensive question has
+	// been answered already by a device identical to this one.
+	//
+	// This read has to guess an endpoint, because the endpoint list is exactly
+	// what has not been asked for yet. A wrong guess costs one round trip and
+	// is not recorded as a problem: the interview simply carries on and asks
+	// again below, once it knows where the Basic cluster actually lives.
+	identified := attempt("manufacturer and model", func(ctx context.Context) error {
+		manufacturer, model, err := c.readBasic(ctx, node, c.basicEndpoint(node))
+		if err == nil {
+			desc.Manufacturer, desc.Model = manufacturer, model
+		}
+		return err
+	}) == nil
+
+	if identified && !opts.Full {
+		if peer, ok := c.peerOf(node, desc.Manufacturer, desc.Model); ok {
+			inherit(&desc, peer)
+			c.recordInterview(node, &desc)
+			return desc, nil
 		}
 	}
 
@@ -329,22 +378,114 @@ func (c *Coordinator) Interview(ctx context.Context, node uint16, opts Interview
 		})
 	}
 
-	// The Basic cluster lives on whichever endpoint implements it, so it can
-	// only be read once the endpoints are known. This part is ZCL rather than
-	// ZDO, and it is the only part of an interview that produces a name a
-	// person would recognise.
-	if ep, ok := endpointWithCluster(desc.Endpoints, zcl.ClusterBasic); ok {
-		step("manufacturer and model", func(ctx context.Context) error {
-			manufacturer, model, err := c.readBasic(ctx, node, ep)
-			if err == nil {
-				desc.Manufacturer, desc.Model = manufacturer, model
-			}
-			return err
-		})
+	// The Basic cluster lives on whichever endpoint implements it, and the
+	// endpoint list has now settled where that is. Asking again is only worth
+	// it if the guess above was wrong; this time a failure is a real problem,
+	// because the endpoint being asked is the one the device nominated.
+	if !identified {
+		if ep, ok := endpointWithCluster(desc.Endpoints, zcl.ClusterBasic); ok {
+			step("manufacturer and model", func(ctx context.Context) error {
+				manufacturer, model, err := c.readBasic(ctx, node, ep)
+				if err == nil {
+					desc.Manufacturer, desc.Model = manufacturer, model
+				}
+				return err
+			})
+		}
 	}
 
 	c.recordInterview(node, &desc)
 	return desc, nil
+}
+
+// basicEndpointGuess is where the Basic cluster is looked for before the
+// endpoint list is known. Endpoint 1 is where a device with a single endpoint
+// puts everything, and the first application endpoint on most of the rest.
+const basicEndpointGuess uint8 = 1
+
+// basicEndpoint picks the endpoint to read the Basic cluster from before the
+// device has said which endpoints it has. Anything the registry already knows
+// about this device beats the guess.
+func (c *Coordinator) basicEndpoint(node uint16) uint8 {
+	if device, ok := c.db.ByNodeID(node); ok {
+		if ep, ok := device.HasCluster(zcl.ClusterBasic); ok {
+			return ep
+		}
+	}
+	return basicEndpointGuess
+}
+
+// peerOf finds an interviewed device identical to the one at node, whose
+// answers this interview can use instead of asking again.
+//
+// A device that has answered for itself is never given a sibling's answers:
+// an observation is worth more than a deduction, so only a record with nothing
+// of its own — or nothing but a previous inheritance — inherits.
+func (c *Coordinator) peerOf(node uint16, manufacturer, model string) (*store.Device, bool) {
+	device, ok := c.db.ByNodeID(node)
+	if !ok {
+		// There is no record to hang an inheritance on. An interview aimed at
+		// an address the registry does not know keeps to its own answers.
+		return nil, false
+	}
+	if !device.Interviewed.IsZero() && device.InheritedFrom == "" {
+		return nil, false
+	}
+	return c.db.PeerOfModel(manufacturer, model, device.IEEE)
+}
+
+// inherit copies an identical device's structure onto this description.
+func inherit(desc *Description, peer *store.Device) {
+	desc.InheritedFrom = peer.IEEE
+	desc.InheritedFromName = peer.Describe()
+	desc.Node = inheritedNode(peer)
+	desc.Power = inheritedPower(peer)
+	desc.Endpoints = inheritedEndpoints(peer)
+}
+
+// inheritedNode rebuilds a node descriptor from what the registry kept of the
+// peer's. The fields the registry does not store — the manufacturer code and
+// the buffer sizes — stay zero rather than being invented.
+func inheritedNode(peer *store.Device) *NodeDescriptor {
+	if peer.NodeType == "" && peer.Capability == nil {
+		return nil
+	}
+	nd := &NodeDescriptor{LogicalType: peer.NodeType}
+	if peer.Capability != nil {
+		capability := zdo.MACCapability(*peer.Capability)
+		nd.Capability = *peer.Capability
+		nd.Mains = capability.Mains()
+		nd.Sleepy = capability.Sleepy()
+	}
+	return nd
+}
+
+// inheritedPower rebuilds a power descriptor from the peer's.
+//
+// Only the supply is a property of the model. How much charge is left in it is
+// this device's own business and is not copied — which is why the registry
+// never kept the level in the first place.
+func inheritedPower(peer *store.Device) *PowerDescriptor {
+	if peer.PowerSource == "" {
+		return nil
+	}
+	return &PowerDescriptor{Source: peer.PowerSource}
+}
+
+// inheritedEndpoints converts a registry record's endpoints back into the
+// shape an interview reports, naming the clusters again on the way out.
+func inheritedEndpoints(peer *store.Device) []Endpoint {
+	endpoints := make([]Endpoint, 0, len(peer.Endpoints))
+	for _, ep := range peer.Endpoints {
+		endpoints = append(endpoints, Endpoint{
+			ID:       ep.ID,
+			Profile:  ep.Profile,
+			DeviceID: ep.Device,
+			Input:    namedClusters(ep.Input),
+			Output:   namedClusters(ep.Output),
+		})
+	}
+	return endpoints
 }
 
 // readBasic reads the manufacturer and model strings from the Basic cluster.
@@ -387,6 +528,14 @@ func (c *Coordinator) recordInterview(node uint16, desc *Description) {
 	}
 	if learnedSomething(*desc) {
 		applyInterview(device, *desc)
+		// The registry is written here rather than left to Close, because an
+		// interview is expensive — minutes of waiting on a sleepy device — and
+		// the next one may be the one that fails. Saving each answer as it
+		// arrives means a run that ends badly still keeps everything it
+		// learned, instead of all of it depending on a clean exit.
+		if err := c.db.Save(); err != nil {
+			desc.Problems = append(desc.Problems, fmt.Sprintf("recording the result: %v", err))
+		}
 	}
 
 	// Identity is settled last, so a model this interview just learned can
@@ -441,6 +590,10 @@ func applyInterview(device *store.Device, desc Description) {
 			})
 		}
 		device.Interviewed = desc.At
+		// Provenance travels with the structure it describes. The same
+		// assignment records an inheritance and clears one, so a full
+		// interview promotes a deduced record to an observed one.
+		device.InheritedFrom = desc.InheritedFrom
 	}
 }
 
