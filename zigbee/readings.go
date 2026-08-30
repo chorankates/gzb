@@ -107,12 +107,10 @@ func (c *Coordinator) handleIncoming(ctx context.Context, m ezsp.Message) ([]Rea
 		return nil, nil
 	}
 
+	// Identity is captured as strings up front, so nothing below holds the
+	// registry lock across network I/O or a caller's callback.
 	now := time.Now()
-	var device *store.Device
-	if d, ok := c.db.ByNodeID(msg.Sender); ok {
-		device = d
-		device.LastSeen = now
-	}
+	ieee, name := c.observeSender(msg.Sender, now)
 
 	frame, err := zcl.Decode(msg.Payload)
 	if err != nil {
@@ -124,22 +122,22 @@ func (c *Coordinator) handleIncoming(ctx context.Context, m ezsp.Message) ([]Rea
 		return nil, err
 	}
 	if handled {
-		c.unhandled(eventFor(device, msg, now, "answered time read"))
+		c.unhandled(eventFor(ieee, name, msg, now, "answered time read"))
 		return nil, nil
 	}
 
 	attrs, err := frame.Attributes()
 	if err != nil {
-		c.unhandled(eventFor(device, msg, now, zcl.CommandName(frame.Command)))
+		c.unhandled(eventFor(ieee, name, msg, now, zcl.CommandName(frame.Command)))
 		return nil, nil
 	}
 
-	readings := make([]Reading, 0, len(attrs))
+	quantities := make([]zcl.Reading, 0, len(attrs))
 	for _, attr := range attrs {
 		quantity, ok := zcl.Interpret(msg.APS.Cluster, attr)
 		if !ok {
 			description := fmt.Sprintf("%s = %v", zcl.AttributeName(msg.APS.Cluster, attr.ID), attr.Value)
-			c.unhandled(eventFor(device, msg, now, description))
+			c.unhandled(eventFor(ieee, name, msg, now, description))
 			continue
 		}
 		if !quantity.Current {
@@ -147,11 +145,21 @@ func (c *Coordinator) handleIncoming(ctx context.Context, m ezsp.Message) ([]Rea
 			// warmest it has been, the range it can measure. That is worth
 			// seeing and is not a reading, so it is reported as what it is
 			// rather than filed under the quantity it resembles.
-			c.unhandled(eventFor(device, msg, now, quantity.String()))
+			c.unhandled(eventFor(ieee, name, msg, now, quantity.String()))
 			continue
 		}
+		quantities = append(quantities, quantity)
+	}
+	if len(quantities) == 0 {
+		return nil, nil
+	}
 
-		reading := Reading{
+	ieee, name = c.recordReadings(msg.Sender, quantities, now)
+	readings := make([]Reading, 0, len(quantities))
+	for _, quantity := range quantities {
+		readings = append(readings, Reading{
+			IEEE:       ieee,
+			DeviceName: name,
 			Capability: quantity.Name,
 			Unit:       quantity.Unit,
 			Value:      quantity.Value,
@@ -160,35 +168,60 @@ func (c *Coordinator) handleIncoming(ctx context.Context, m ezsp.Message) ([]Rea
 			RSSI:       msg.RSSI,
 			NodeID:     msg.Sender,
 			Cluster:    zcl.ClusterName(msg.APS.Cluster),
-		}
-		if device == nil {
-			// Traffic can arrive before a join callback supplies the stable
-			// IEEE address. Preserve those readings under a temporary NodeID
-			// record; Store.Observe promotes it when identity becomes known.
-			device, _ = c.db.ObserveNodeID(msg.Sender, now)
-		}
-		if device.Identified() {
-			reading.IEEE = device.IEEE
-			reading.DeviceName = device.Describe()
-		}
-		device.Record(quantity.Name, quantity.Value, quantity.Unit, now)
-		readings = append(readings, reading)
+		})
 	}
 	return readings, nil
 }
 
-func eventFor(device *store.Device, msg ezsp.IncomingMessage, at time.Time, description string) Event {
-	event := Event{
+// observeSender updates last-seen for a sender the registry knows and reports
+// its identity — empty strings for a device with no settled identity yet.
+func (c *Coordinator) observeSender(sender uint16, now time.Time) (ieee, name string) {
+	c.dbMu.Lock()
+	defer c.dbMu.Unlock()
+	device, ok := c.db.ByNodeID(sender)
+	if !ok {
+		return "", ""
+	}
+	device.LastSeen = now
+	return identityOf(device)
+}
+
+// recordReadings writes interpreted quantities to the registry and returns
+// the identity the readings should carry.
+func (c *Coordinator) recordReadings(sender uint16, quantities []zcl.Reading, now time.Time) (ieee, name string) {
+	c.dbMu.Lock()
+	defer c.dbMu.Unlock()
+	device, ok := c.db.ByNodeID(sender)
+	if !ok {
+		// Traffic can arrive before a join callback supplies the stable
+		// IEEE address. Preserve those readings under a temporary NodeID
+		// record; Store.Observe promotes it when identity becomes known.
+		device, _ = c.db.ObserveNodeID(sender, now)
+	}
+	for _, quantity := range quantities {
+		device.Record(quantity.Name, quantity.Value, quantity.Unit, now)
+	}
+	return identityOf(device)
+}
+
+// identityOf is the identity a reading or event should report: nothing at all
+// until the record carries a real IEEE address rather than a placeholder.
+func identityOf(device *store.Device) (ieee, name string) {
+	if !device.Identified() {
+		return "", ""
+	}
+	return device.IEEE, device.Describe()
+}
+
+func eventFor(ieee, name string, msg ezsp.IncomingMessage, at time.Time, description string) Event {
+	return Event{
 		At:          at,
+		IEEE:        ieee,
+		DeviceName:  name,
 		NodeID:      msg.Sender,
 		Cluster:     zcl.ClusterName(msg.APS.Cluster),
 		Description: description,
 	}
-	if device != nil && device.Identified() {
-		event.IEEE = device.IEEE
-		event.DeviceName = device.Describe()
-	}
-	return event
 }
 
 func (c *Coordinator) unhandled(event Event) {
@@ -198,7 +231,10 @@ func (c *Coordinator) unhandled(event Event) {
 }
 
 func (c *Coordinator) save(errs chan<- error) {
-	if err := c.db.Save(); err != nil {
+	c.dbMu.Lock()
+	err := c.db.Save()
+	c.dbMu.Unlock()
+	if err != nil {
 		sendError(errs, err)
 	}
 }

@@ -36,7 +36,8 @@ grow their own EZSP/ZCL loop:
 cmd/gzb            CLI: probe, network, join, monitor, devices, name,
                         interview, read, write, reporting
   zigbee           public coordinator API: readings, discovery, attributes,
-                        reporting, permit-join, Time
+                        reporting, permit-join, join watching, the device
+                        registry and naming, Time
   internal/store   device registry: identities, names and last known readings
   internal/zdo     ZDO: descriptors, endpoint discovery, transaction matching
   internal/zcl     ZCL: attribute reports and readings, request and response
@@ -45,6 +46,14 @@ cmd/gzb            CLI: probe, network, join, monitor, devices, name,
     internal/ash   ASH: framing, CRC, randomization, ACK/retransmit
       serial       115200 8N1, DTR and RTS deasserted
 ```
+
+The process holding the serial port holds it exclusively, so anything an
+application wants to offer — pairing from a UI, naming a device from an HTTP
+handler — has to go through the process that is already listening. The public
+package is built for that: `Joins` streams pairing activity, `Devices`,
+`Device`, `SetName` and `ClearName` expose the registry, and all of it is safe
+to call from other goroutines while the readings loop runs. `gzb join` is
+itself a consumer of this API rather than a private implementation of it.
 
 Applications can consume readings without depending on the protocol internals:
 
@@ -788,6 +797,11 @@ Working and verified against hardware, with a real device paired:
 - Reporting configuration, accepted by a real sensor and restored to its own
   default afterwards
 - Device names, and addressing a device by name wherever one is taken
+- Pairing as a library concern: `Coordinator.Joins` streams device arrivals,
+  departures and the join window opening and closing, each arrival recorded
+  to the registry as it happens; `gzb join` consumes it like any application
+- Registry access and naming through the public API (`Devices`, `Device`,
+  `SetName`, `ClearName`), safe from any goroutine alongside the readings loop
 - Outbound unicast, exercised by the Time cluster responder
 - `probe`, `network`, `permit-join`, `join`, `devices`, `name`, `monitor`,
   `interview`, `read`, `write`, `reporting`, `config`

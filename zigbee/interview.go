@@ -340,8 +340,7 @@ func (c *Coordinator) Interview(ctx context.Context, node uint16, opts Interview
 	}) == nil
 
 	if identified && !opts.Full {
-		if peer, ok := c.peerOf(node, desc.Manufacturer, desc.Model); ok {
-			inherit(&desc, peer)
+		if c.inheritFromPeer(node, &desc) {
 			c.recordInterview(node, &desc)
 			return desc, nil
 		}
@@ -407,6 +406,8 @@ const basicEndpointGuess uint8 = 1
 // device has said which endpoints it has. Anything the registry already knows
 // about this device beats the guess.
 func (c *Coordinator) basicEndpoint(node uint16) uint8 {
+	c.dbMu.Lock()
+	defer c.dbMu.Unlock()
 	if device, ok := c.db.ByNodeID(node); ok {
 		if ep, ok := device.HasCluster(zcl.ClusterBasic); ok {
 			return ep
@@ -415,23 +416,32 @@ func (c *Coordinator) basicEndpoint(node uint16) uint8 {
 	return basicEndpointGuess
 }
 
-// peerOf finds an interviewed device identical to the one at node, whose
-// answers this interview can use instead of asking again.
+// inheritFromPeer copies an interviewed identical device's answers onto this
+// description, reporting whether one was found. It resolves the peer and
+// copies from it under one hold of the registry lock, so the record it reads
+// cannot change between the two.
 //
 // A device that has answered for itself is never given a sibling's answers:
 // an observation is worth more than a deduction, so only a record with nothing
 // of its own — or nothing but a previous inheritance — inherits.
-func (c *Coordinator) peerOf(node uint16, manufacturer, model string) (*store.Device, bool) {
+func (c *Coordinator) inheritFromPeer(node uint16, desc *Description) bool {
+	c.dbMu.Lock()
+	defer c.dbMu.Unlock()
 	device, ok := c.db.ByNodeID(node)
 	if !ok {
 		// There is no record to hang an inheritance on. An interview aimed at
 		// an address the registry does not know keeps to its own answers.
-		return nil, false
+		return false
 	}
 	if !device.Interviewed.IsZero() && device.InheritedFrom == "" {
-		return nil, false
+		return false
 	}
-	return c.db.PeerOfModel(manufacturer, model, device.IEEE)
+	peer, ok := c.db.PeerOfModel(desc.Manufacturer, desc.Model, device.IEEE)
+	if !ok {
+		return false
+	}
+	inherit(desc, peer)
+	return true
 }
 
 // inherit copies an identical device's structure onto this description.
@@ -440,7 +450,7 @@ func inherit(desc *Description, peer *store.Device) {
 	desc.InheritedFromName = peer.Describe()
 	desc.Node = inheritedNode(peer)
 	desc.Power = inheritedPower(peer)
-	desc.Endpoints = inheritedEndpoints(peer)
+	desc.Endpoints = endpointsOf(peer)
 }
 
 // inheritedNode rebuilds a node descriptor from what the registry kept of the
@@ -472,9 +482,12 @@ func inheritedPower(peer *store.Device) *PowerDescriptor {
 	return &PowerDescriptor{Source: peer.PowerSource}
 }
 
-// inheritedEndpoints converts a registry record's endpoints back into the
-// shape an interview reports, naming the clusters again on the way out.
-func inheritedEndpoints(peer *store.Device) []Endpoint {
+// endpointsOf converts a registry record's endpoints back into the shape an
+// interview reports, naming the clusters again on the way out.
+func endpointsOf(peer *store.Device) []Endpoint {
+	if len(peer.Endpoints) == 0 {
+		return nil
+	}
 	endpoints := make([]Endpoint, 0, len(peer.Endpoints))
 	for _, ep := range peer.Endpoints {
 		endpoints = append(endpoints, Endpoint{
@@ -522,6 +535,8 @@ func (c *Coordinator) readBasic(ctx context.Context, node uint16, endpoint uint8
 // would fill the registry with records that have no stable identity behind
 // them.
 func (c *Coordinator) recordInterview(node uint16, desc *Description) {
+	c.dbMu.Lock()
+	defer c.dbMu.Unlock()
 	device, ok := c.db.ByNodeID(node)
 	if !ok {
 		return

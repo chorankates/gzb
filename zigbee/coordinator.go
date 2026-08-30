@@ -2,8 +2,11 @@
 //
 // It owns the protocol loop that turns device attribute reports into readings,
 // answers services expected from a coordinator, and enriches readings with the
-// local device registry. Applications should use this package instead of
-// decoding EZSP or ZCL frames themselves.
+// local device registry. It also watches devices join and leave, and exposes
+// the registry itself — listing devices and naming them — so an application
+// holding the serial port can offer pairing and naming without reaching past
+// this package. Applications should use it instead of decoding EZSP or ZCL
+// frames themselves.
 package zigbee
 
 import (
@@ -83,6 +86,7 @@ type Reading struct {
 type connection interface {
 	NetworkState(context.Context) (ezsp.NetworkStatus, error)
 	Subscribe(func(ezsp.Message) bool, int) (<-chan ezsp.Message, func())
+	WatchJoins(int) (<-chan ezsp.JoinEvent, <-chan error, func())
 	SendUnicast(context.Context, uint16, ezsp.APSFrame, uint8, []byte) (uint8, error)
 	Request(context.Context, uint16, ezsp.APSFrame, []byte, func(ezsp.IncomingMessage) bool) (ezsp.IncomingMessage, error)
 	AllowJoins(context.Context) error
@@ -101,6 +105,13 @@ type Coordinator struct {
 	closed         bool
 	readingsActive bool
 	readingsDone   chan struct{}
+
+	// dbMu guards the device registry. The readings loop, join recording,
+	// discovery and the registry API all touch it, and an application runs
+	// those on different goroutines — a readings loop in one, a pairing watch
+	// in another, and naming from wherever a user asked. It is never held
+	// across network I/O or a caller's callback.
+	dbMu sync.Mutex
 
 	// seq is the transaction sequence counter for request/response traffic.
 	// It is atomic rather than guarded by mu because discovery queries may run
@@ -184,7 +195,9 @@ func (c *Coordinator) Close() error {
 	if readingsDone != nil {
 		<-readingsDone
 	}
+	c.dbMu.Lock()
 	saveErr := c.db.Save()
+	c.dbMu.Unlock()
 	return errors.Join(connErr, saveErr)
 }
 

@@ -532,6 +532,8 @@ func reportInterval(d time.Duration, which string) (uint16, error) {
 // interview does not invent one: a read can be aimed at any address, and a
 // record keyed by an address nobody has identified is noise.
 func (c *Coordinator) recordValues(t Target, values []AttributeValue, now time.Time) {
+	c.dbMu.Lock()
+	defer c.dbMu.Unlock()
 	device, ok := c.db.ByNodeID(t.Node)
 	if !ok {
 		return

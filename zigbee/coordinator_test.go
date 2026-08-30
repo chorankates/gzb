@@ -18,6 +18,11 @@ type fakeConnection struct {
 	state ezsp.NetworkStatus
 	msgs  chan ezsp.Message
 
+	// joinEvents and joinErrs feed a WatchJoins subscription the way the real
+	// connection's decoder would.
+	joinEvents chan ezsp.JoinEvent
+	joinErrs   chan error
+
 	// responder answers a Request the way a device would. Returning false
 	// leaves the request unanswered, which is what a sleeping device looks
 	// like from here.
@@ -41,7 +46,12 @@ type sentRequest struct {
 }
 
 func newFakeConnection() *fakeConnection {
-	return &fakeConnection{state: ezsp.NetworkJoined, msgs: make(chan ezsp.Message, 8)}
+	return &fakeConnection{
+		state:      ezsp.NetworkJoined,
+		msgs:       make(chan ezsp.Message, 8),
+		joinEvents: make(chan ezsp.JoinEvent, 8),
+		joinErrs:   make(chan error, 8),
+	}
 }
 
 func (f *fakeConnection) NetworkState(context.Context) (ezsp.NetworkStatus, error) {
@@ -50,6 +60,10 @@ func (f *fakeConnection) NetworkState(context.Context) (ezsp.NetworkStatus, erro
 
 func (f *fakeConnection) Subscribe(func(ezsp.Message) bool, int) (<-chan ezsp.Message, func()) {
 	return f.msgs, func() {}
+}
+
+func (f *fakeConnection) WatchJoins(int) (<-chan ezsp.JoinEvent, <-chan error, func()) {
+	return f.joinEvents, f.joinErrs, func() {}
 }
 
 func (f *fakeConnection) SendUnicast(context.Context, uint16, ezsp.APSFrame, uint8, []byte) (uint8, error) {
@@ -93,7 +107,11 @@ func (f *fakeConnection) PermitJoining(_ context.Context, duration uint8) error 
 }
 
 func (f *fakeConnection) Close() error {
-	f.closeOnce.Do(func() { close(f.msgs) })
+	f.closeOnce.Do(func() {
+		close(f.msgs)
+		close(f.joinEvents)
+		close(f.joinErrs)
+	})
 	return nil
 }
 
