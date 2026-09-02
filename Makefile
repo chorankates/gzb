@@ -13,6 +13,9 @@ build:
 run:
 	@go run ./cmd/gzb
 
+repl: build
+	@go run ./cmd/gzb repl
+
 # Re-captures the console transcripts in README.md from a real device. Needs
 # hardware and a device to aim at, which is why it is not part of `test`:
 #   make recapture DEVICE="living room thermo"

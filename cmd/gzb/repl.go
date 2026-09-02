@@ -74,19 +74,24 @@ func cmdRepl(ctx context.Context, g *globals, args []string) error {
 		return flag.ErrHelp
 	}
 
-	coordinator, err := zigbee.Open(ctx, coordinatorOptions(g, *dbPath))
+	s := &session{
+		g:        g,
+		registry: registryPath(*dbPath),
+		commands: replCommands(),
+		prompt:   "gzb> ",
+	}
+	// Frames that carry no reading go to whichever command is watching for
+	// them — `monitor -raw`, `join -verbose` — and nowhere the rest of the
+	// time. The hook is set once here because it can only be set at open.
+	opts := coordinatorOptions(g, *dbPath)
+	opts.OnUnhandled = s.unhandled
+	coordinator, err := zigbee.Open(ctx, opts)
 	if err != nil {
 		return err
 	}
 	defer coordinator.Close()
+	s.coordinator = coordinator
 
-	s := &session{
-		g:           g,
-		coordinator: coordinator,
-		registry:    registryPath(*dbPath),
-		commands:    replCommands(),
-		prompt:      "gzb> ",
-	}
 	in, out := int(os.Stdin.Fd()), int(os.Stdout.Fd())
 	if term.IsTerminal(in) && term.IsTerminal(out) {
 		return s.runTerminal(ctx, in)
@@ -108,11 +113,12 @@ type session struct {
 	keys  *keyPump
 	width int
 
-	// sink is where reports go while `monitor` is printing them, and nil the
-	// rest of the time. The loop that records them to the registry runs
-	// either way.
+	// sink is where reports go while a command is printing them, and nil the
+	// rest of the time; frames is the same for frames that carry no reading.
+	// The loop that records reports to the registry runs either way.
 	sinkMu sync.Mutex
 	sink   chan<- zigbee.Reading
+	frames chan<- zigbee.Event
 }
 
 // errQuit is how a command ends the session.
@@ -228,10 +234,27 @@ func (s *session) listen(ctx context.Context) {
 	}()
 }
 
-func (s *session) setSink(sink chan<- zigbee.Reading) {
+// setSinks directs reports and frames to a command that wants to print them.
+// Nil means nobody does.
+func (s *session) setSinks(readings chan<- zigbee.Reading, frames chan<- zigbee.Event) {
 	s.sinkMu.Lock()
 	defer s.sinkMu.Unlock()
-	s.sink = sink
+	s.sink, s.frames = readings, frames
+}
+
+// unhandled is the coordinator's hook for a frame that carried no reading.
+// It runs on the readings loop, so it must not block: a command that is not
+// keeping up loses a frame rather than stalling the protocol.
+func (s *session) unhandled(event zigbee.Event) {
+	s.sinkMu.Lock()
+	defer s.sinkMu.Unlock()
+	if s.frames == nil {
+		return
+	}
+	select {
+	case s.frames <- event:
+	default:
+	}
 }
 
 // async prints something that arrived on its own schedule: above the prompt
@@ -445,12 +468,40 @@ func replCommands() []replCommand {
 			},
 		},
 		{
+			name: "join", synopsis: "[seconds]", summary: "open the network and watch devices arrive (default 60s)",
+			repeatFrom: -1, stopsOnEnter: true,
+			usage: joinUsage,
+			bind: func(fs *flag.FlagSet) runner {
+				verbose := fs.Bool("verbose", false, "decode and log every frame received during the window")
+				return func(ctx context.Context, s *session, args []string) error {
+					if len(args) > 1 {
+						fs.Usage()
+						return nil
+					}
+					seconds, err := parseJoinWindow(args)
+					if err != nil {
+						return err
+					}
+					var feed joinFeed
+					if *verbose {
+						readings := make(chan zigbee.Reading, 64)
+						frames := make(chan zigbee.Event, 64)
+						s.setSinks(readings, frames)
+						defer s.setSinks(nil, nil)
+						feed.readings, feed.frames = readings, frames
+					}
+					return runJoin(ctx, s.g, s.coordinator, seconds, feed, s.registry)
+				}
+			},
+		},
+		{
 			name: "monitor", summary: "print reports as they arrive, until Enter",
 			repeatFrom: -1, stopsOnEnter: true,
 			bind: func(fs *flag.FlagSet) runner {
 				duration := fs.Duration("for", 0, "stop after this long (default: until Enter or Ctrl-C)")
+				raw := fs.Bool("raw", false, "also print frames that carry no readable attributes")
 				return func(ctx context.Context, s *session, args []string) error {
-					return s.monitor(ctx, *duration)
+					return s.monitor(ctx, *duration, *raw)
 				}
 			},
 		},
@@ -561,10 +612,14 @@ func identityWord(d zigbee.Device) string {
 
 // monitor prints reports as they arrive, until the context ends — which Enter
 // and Ctrl-C both do — or the duration runs out.
-func (s *session) monitor(ctx context.Context, duration time.Duration) error {
+func (s *session) monitor(ctx context.Context, duration time.Duration, raw bool) error {
 	sink := make(chan zigbee.Reading, 64)
-	s.setSink(sink)
-	defer s.setSink(nil)
+	var frames chan zigbee.Event
+	if raw && !s.g.json {
+		frames = make(chan zigbee.Event, 64)
+	}
+	s.setSinks(sink, frames)
+	defer s.setSinks(nil, nil)
 
 	if !s.g.json {
 		fmt.Println("Printing reports as they arrive. Enter or Ctrl-C stops.")
@@ -586,6 +641,8 @@ func (s *session) monitor(ctx context.Context, duration time.Duration) error {
 				continue
 			}
 			fmt.Println(formatReading(reading))
+		case event := <-frames:
+			fmt.Println(formatUnhandled(event))
 		case <-stop:
 			return nil
 		case <-ctx.Done():

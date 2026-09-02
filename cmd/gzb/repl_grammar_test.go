@@ -176,6 +176,13 @@ func TestFlagsCompleteBeforeTheDevice(t *testing.T) {
 	if got := candidatesFor(t, "light -transition=2s l"); !slices.Equal(got, []string{"light1", "light2"}) {
 		t.Errorf("after a flag with its value attached = %v", got)
 	}
+	// Commands with no positional arguments still have their flags.
+	if got := candidatesFor(t, "join -"); !slices.Equal(got, []string{"-verbose"}) {
+		t.Errorf("join -<tab> = %v", got)
+	}
+	if got := candidatesFor(t, "monitor -"); !slices.Equal(got, []string{"-for", "-raw"}) {
+		t.Errorf("monitor -<tab> = %v", got)
+	}
 }
 
 func TestCompletionStartsAtTheWordIncludingItsQuote(t *testing.T) {
@@ -270,10 +277,24 @@ func TestRunHandlesWhatNeedsNoDevice(t *testing.T) {
 			t.Errorf("help = %v", err)
 		}
 	})
-	for _, want := range []string{"light", "read", "interview", "Tab completes"} {
+	for _, want := range []string{"light", "read", "interview", "join", "Tab completes"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("help does not mention %q:\n%s", want, out)
 		}
+	}
+
+	// A join window that would close the network is refused before the
+	// window is opened, so it needs no coordinator to be refused by.
+	if err := s.run(ctx, "join 0"); err == nil || !strings.Contains(err.Error(), "permit-join") {
+		t.Errorf("join 0 = %v, want a pointer at permit-join", err)
+	}
+	out = capture(t, func() {
+		if err := s.run(ctx, "join 1 2"); err != nil {
+			t.Errorf("join with two arguments = %v", err)
+		}
+	})
+	if !strings.Contains(out, "usage: gzb join") {
+		t.Errorf("join with two arguments printed:\n%s", out)
 	}
 
 	// A command short of its arguments shows its usage rather than dialling.

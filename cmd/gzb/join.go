@@ -21,12 +21,8 @@ import (
 // session stays up for the whole window so the join callbacks can be decoded
 // and recorded. A device that joins while nothing is listening is still joined
 // to the network, but nothing local knows it exists.
-func cmdJoin(ctx context.Context, g *globals, args []string) error {
-	fs := flag.NewFlagSet("join", flag.ContinueOnError)
-	dbPath := fs.String("db", "", "device registry file (default: "+store.DefaultPath()+")")
-	verbose := fs.Bool("verbose", false, "decode and log every frame received during the window")
-	fs.Usage = func() {
-		fmt.Fprint(os.Stderr, `usage: gzb join [seconds]
+func joinUsage(fs *flag.FlagSet) {
+	fmt.Fprint(fs.Output(), `usage: gzb join [seconds]
 
 Opens the network to new devices and watches them arrive, recording each one
 in the local device registry. Defaults to 60 seconds.
@@ -38,43 +34,40 @@ With --json, each event is emitted as one JSON object per line.
 
 flags:
 `)
-		fs.PrintDefaults()
-	}
+	fs.PrintDefaults()
+}
+
+func cmdJoin(ctx context.Context, g *globals, args []string) error {
+	fs := flag.NewFlagSet("join", flag.ContinueOnError)
+	dbPath := fs.String("db", "", "device registry file (default: "+store.DefaultPath()+")")
+	verbose := fs.Bool("verbose", false, "decode and log every frame received during the window")
+	fs.Usage = func() { joinUsage(fs) }
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-
-	seconds := uint64(60)
 	if fs.NArg() > 1 {
 		fs.Usage()
 		return flag.ErrHelp
 	}
-	if fs.NArg() == 1 {
-		var err error
-		seconds, err = strconv.ParseUint(fs.Arg(0), 10, 8)
-		if err != nil {
-			return fmt.Errorf("invalid duration %q: %w", fs.Arg(0), err)
-		}
-	}
-	if seconds == 0 {
-		return fmt.Errorf("a join window of 0 seconds would close the network immediately; use `gzb permit-join 0` for that")
+	seconds, err := parseJoinWindow(fs.Args())
+	if err != nil {
+		return err
 	}
 
 	// The watching, recording and window bookkeeping all live in the public
 	// zigbee package, so an application pairing through it and this command
 	// see exactly the same events.
 	opts := coordinatorOptions(g, *dbPath)
-	start := time.Now()
+	var feed joinFeed
 	if *verbose {
-		// Everything the device sends after joining, for working out why it
-		// might not stay. The readings loop decodes it, answers Time-cluster
-		// reads, and hands the rest over as unhandled events. Note that ZDO
-		// descriptor requests are answered by the NCP itself and never reach
-		// the host, so silence here is expected until the device speaks ZCL.
+		frames := make(chan zigbee.Event, 64)
 		opts.OnUnhandled = func(ev zigbee.Event) {
-			fmt.Printf("[%6.1fs] frame         0x%04X  %s  %s\n",
-				time.Since(start).Seconds(), ev.NodeID, ev.Cluster, ev.Description)
+			select {
+			case frames <- ev:
+			default:
+			}
 		}
+		feed.frames = frames
 	}
 
 	c, err := zigbee.Open(ctx, opts)
@@ -83,16 +76,52 @@ flags:
 	}
 	defer c.Close()
 
+	if *verbose {
+		feed.readings, feed.readErrs = c.Readings(ctx)
+	}
+	return runJoin(ctx, g, c, seconds, feed, registryPath(*dbPath))
+}
+
+// parseJoinWindow reads how long the network is to be open for, in whole
+// seconds, as the protocol carries it.
+func parseJoinWindow(args []string) (uint64, error) {
+	seconds := uint64(60)
+	if len(args) == 1 {
+		var err error
+		seconds, err = strconv.ParseUint(args[0], 10, 8)
+		if err != nil {
+			return 0, fmt.Errorf("invalid duration %q: %w", args[0], err)
+		}
+	}
+	if seconds == 0 {
+		return 0, fmt.Errorf("a join window of 0 seconds would close the network immediately; use `gzb permit-join 0` for that")
+	}
+	return seconds, nil
+}
+
+// joinFeed is what a join run prints besides its own events: everything the
+// device sends after joining, when --verbose asks for it, for working out why
+// it might not stay. The readings loop decodes that traffic, answers
+// Time-cluster reads, and hands the rest over as unhandled events. ZDO
+// descriptor requests are answered by the NCP itself and never reach the host,
+// so silence is expected until the device speaks ZCL.
+//
+// Any of the channels may be nil, and a nil channel is simply never read.
+type joinFeed struct {
+	readings <-chan zigbee.Reading
+	readErrs <-chan error
+	frames   <-chan zigbee.Event
+}
+
+// runJoin opens the network for a window and watches devices arrive, through
+// an open coordinator. It is the half of the command a session shares with
+// the command line, and at a prompt it is the more useful half: a device that
+// has just joined is awake, and the interview it needs is one line away.
+func runJoin(ctx context.Context, g *globals, c *zigbee.Coordinator, seconds uint64, feed joinFeed, registry string) error {
 	// Subscribe before opening the window so a fast device cannot join in the
 	// gap between the two.
 	events, errs, cancelWatch := c.Joins(64)
 	defer cancelWatch()
-
-	var readings <-chan zigbee.Reading
-	var readErrs <-chan error
-	if *verbose {
-		readings, readErrs = c.Readings(ctx)
-	}
 
 	if err := c.PermitJoin(ctx, time.Duration(seconds)*time.Second); err != nil {
 		return err
@@ -102,15 +131,15 @@ flags:
 
 	if !g.json {
 		fmt.Printf("Network open for %d seconds. Put the device into pairing mode now.\n", seconds)
-		fmt.Printf("Registry: %s\n\n", registryPath(*dbPath))
+		fmt.Printf("Registry: %s\n\n", registry)
 	}
 
-	start = time.Now()
+	start := time.Now()
 	deadline := time.NewTimer(time.Duration(seconds) * time.Second)
 	defer deadline.Stop()
 
 	var seen, fresh int
-	var opened bool
+	var opened, interrupted bool
 	enc := json.NewEncoder(os.Stdout)
 
 watch:
@@ -156,25 +185,33 @@ watch:
 			// A callback we could not decode is worth reporting but not worth
 			// ending the pairing window over.
 			fmt.Fprintf(os.Stderr, "gzb: %v\n", err)
-		case reading, ok := <-readings:
+		case reading, ok := <-feed.readings:
 			if !ok {
-				readings = nil
+				feed.readings = nil
 				continue
 			}
 			fmt.Printf("[%6.1fs] reading       0x%04X  %s %.2f %s\n",
 				time.Since(start).Seconds(), reading.NodeID, reading.Capability, reading.Value, reading.Unit)
-		case err, ok := <-readErrs:
+		case err, ok := <-feed.readErrs:
 			if !ok {
-				readErrs = nil
+				feed.readErrs = nil
 				continue
 			}
 			fmt.Fprintf(os.Stderr, "gzb: %v\n", err)
+		case ev, ok := <-feed.frames:
+			if !ok {
+				feed.frames = nil
+				continue
+			}
+			fmt.Printf("[%6.1fs] frame         0x%04X  %s  %s\n",
+				time.Since(start).Seconds(), ev.NodeID, ev.Cluster, ev.Description)
 		case <-deadline.C:
 			break watch
 		case <-ctx.Done():
 			if !g.json {
 				fmt.Print("\nInterrupted.\n")
 			}
+			interrupted = true
 			break watch
 		}
 	}
@@ -183,7 +220,9 @@ watch:
 		return nil
 	}
 	fmt.Printf("\nWindow closed. %d event(s), %d new device(s).\n", seen, fresh)
-	if seen > 0 {
+	// A window cut short says nothing about the device: the advice below is
+	// about a window that stayed open and heard nothing.
+	if seen > 0 || interrupted {
 		return nil
 	}
 

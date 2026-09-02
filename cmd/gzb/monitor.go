@@ -42,17 +42,7 @@ flags:
 
 	opts := coordinatorOptions(g, *dbPath)
 	if *raw && !g.json {
-		opts.OnUnhandled = func(event zigbee.Event) {
-			name := event.DeviceName
-			if name == "" {
-				name = event.IEEE
-			}
-			if name == "" {
-				name = fmt.Sprintf("0x%04X", event.NodeID)
-			}
-			fmt.Printf("%s  %-24s %-12s %s\n",
-				event.At.Format("15:04:05"), name, event.Cluster, event.Description)
-		}
+		opts.OnUnhandled = func(event zigbee.Event) { fmt.Println(formatUnhandled(event)) }
 	}
 
 	coordinator, err := zigbee.Open(ctx, opts)
@@ -110,14 +100,26 @@ flags:
 
 // formatReading renders one report as a monitor line: when, who, what.
 func formatReading(reading zigbee.Reading) string {
-	name := reading.DeviceName
-	if name == "" {
-		name = reading.IEEE
-	}
-	if name == "" {
-		name = fmt.Sprintf("0x%04X", reading.NodeID)
-	}
 	return fmt.Sprintf("%s  %-24s %-12s %8.2f %-3s  lqi %3d  rssi %d",
-		reading.At.Format("15:04:05"), name, reading.Capability,
+		reading.At.Format("15:04:05"), senderName(reading.DeviceName, reading.IEEE, reading.NodeID), reading.Capability,
 		reading.Value, reading.Unit, reading.LQI, reading.RSSI)
+}
+
+// formatUnhandled renders a frame that carried no reading, for --raw.
+func formatUnhandled(event zigbee.Event) string {
+	return fmt.Sprintf("%s  %-24s %-12s %s",
+		event.At.Format("15:04:05"), senderName(event.DeviceName, event.IEEE, event.NodeID), event.Cluster, event.Description)
+}
+
+// senderName is what to call the device a frame came from: its name, else
+// its identity, else the address the frame carried.
+func senderName(name, ieee string, node uint16) string {
+	switch {
+	case name != "":
+		return name
+	case ieee != "":
+		return ieee
+	default:
+		return fmt.Sprintf("0x%04X", node)
+	}
 }

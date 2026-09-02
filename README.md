@@ -871,6 +871,16 @@ works there too. Nothing that resolved before stops resolving: the whole
 registry is still tried when the scope has no match, and an ambiguity is still
 an error naming the candidates rather than a guess.
 
+`join` is at the prompt too, and it is where a session earns its keep. The
+best moment to interview a battery device is [immediately after it
+joins](#interviewing-something-that-is-asleep), while it is still awake, and
+from the shell that moment is spent starting another process and resetting
+the adapter. Here the join window closes, the new device is already in the
+registry the prompt completes from, and `interview` it is the next line.
+`join -verbose` shows every frame the device sends after joining, through the
+session's own readings loop rather than a second one; `monitor -raw` shows
+the same frames outside a join.
+
 Names with spaces complete with their quotes — `read liv<Tab>` becomes
 `read "living room thermo" ` — and double quotes are the prompt's only quoting,
 because it is not a shell. History persists in a file beside the registry.
@@ -1075,6 +1085,8 @@ Working and verified against hardware, with a real device paired:
   driven through a pseudo-terminal against the real network, lights toggled
   and put back
 - Device resolution scoped to the command's cluster, so `light 1` is light1
+- Pairing from the prompt: `join` shares its watch with the command line and
+  leaves the new device one `interview` away while it is still awake
 - Raw command escape hatch (`ezsp.Conn.Call`) for any unmodelled command
 
 Verified end to end with a SONOFF temperature/humidity sensor
@@ -1093,7 +1105,6 @@ revert to its own default — both answered `ok`.
 Not built yet:
 
 - Binding management
-- Pairing from the prompt: `join` is still a command-line affair
 
 
 ## usage
