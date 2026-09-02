@@ -368,3 +368,43 @@ func TestOpenDropsStatisticsRecordedAsReadings(t *testing.T) {
 		t.Errorf("temperature = %+v, want 26.9 °C", got)
 	}
 }
+
+// Illuminance was recorded as though the wire value were already lux, so a
+// registry written before the fix holds figures like "15564 lx" for a room
+// that was at 36. The entry cannot be corrected in place — a converted value
+// is indistinguishable from a raw one and would be converted again on the next
+// start — so it is dropped and the next report replaces it.
+func TestOpenDropsIlluminanceRecordedAsRaw(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "devices.json")
+	now := time.Now().Round(time.Millisecond)
+	s := &Store{path: path, Devices: map[string]*Device{
+		"light": {
+			IEEE: "light",
+			Readings: map[string]Reading{
+				"illuminance": {Value: 15564, Unit: "lx", At: now},
+				"on/off":      {Value: 0, At: now},
+				"temperature": {Value: 21.5, Unit: "°C", At: now},
+			},
+		},
+	}}
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	readings := reopened.Devices["light"].Readings
+	if got, ok := readings["illuminance"]; ok {
+		t.Errorf("illuminance survived as %+v, and %v lx is not a reading of anything", got, got.Value)
+	}
+	// Only that one entry goes. A migration that took the neighbouring
+	// readings with it would be a worse bug than the one being fixed.
+	if got := readings["temperature"]; got.Value != 21.5 {
+		t.Errorf("temperature = %+v, want 21.5 °C", got)
+	}
+	if _, ok := readings["on/off"]; !ok {
+		t.Error("on/off was dropped along with the illuminance")
+	}
+}

@@ -312,6 +312,38 @@ A4:C1:38:18:56:07:FF:FF  0x90CB
 `--json` emits one object per reading, and `--raw` additionally shows frames
 that carry no interpretable attributes.
 
+### One measurement is not a multiple of what was sent
+
+Most ZCL measurements are the value in fixed-point: a temperature arrives as
+`2820` and means 28.20 °C, so a scale factor is all a reading needs. Illuminance
+is the exception, and gzb got it wrong for long enough to fill a registry with
+the raw number. The Illuminance Measurement cluster carries
+
+```
+MeasuredValue = 10000 · log₁₀(lux) + 1
+```
+
+a logarithmic encoding that fits five decades of daylight into sixteen bits.
+Read as though it were already lux it is wrong by orders of magnitude, and
+wrong in the direction that looks plausible — a lamp reporting `12788` was
+sitting in a room at 19 lx, not in a floodlit one:
+
+```console
+$ gzb read light1 0x0400 0x0000
+  illuminance              19.00 lx   (raw 12788, uint16)
+```
+
+An `attributeSpec` therefore carries an optional `convert` alongside its scale,
+for the quantities that are not a plain multiple of the raw value. The sentinel
+gets the same treatment: `0xFFFF` means the device has nothing to report, and
+through the formula it would claim three million lux with a straight face, so
+it is not a reading at all rather than a very bright one.
+
+Registries written before the fix hold the raw numbers under `lx`. A stored
+value cannot be converted in place — a corrected entry is indistinguishable
+from a raw one and would be converted again on the next start — so `store.Open`
+drops the entry and lets the next report replace it with a true one.
+
 ## Asking a device what it is
 
 A device that has joined is only an address. ZDO — Zigbee Device Objects,
@@ -651,6 +683,138 @@ that are safe to repeat go through this path. Reading an attribute, writing
 one, and configuring reporting all are: the second copy asks for exactly what
 the first did.
 
+## Operating a light
+
+Reading and writing attributes is enough to watch a device and not enough to
+work one. A light's `CurrentHue` is read-only and a device says so:
+
+```console
+$ gzb write light1 color hue 0
+light1 (0xA489) endpoint 1, color
+  hue                      = 0 (uint8)
+  waiting up to 5m0s; a battery device only listens while polling its parent
+  !   hue: read only
+```
+
+Colour and brightness are changed by cluster-specific commands, which are the
+other half of the ZCL: not "set this attribute" but "do this thing", with the
+device updating its own attributes as a result. The difference on the wire is
+one bit in the frame control field, and it is not a forgiving one — command
+`0x06` is Move to Hue and Saturation on the colour cluster, Step (with On/Off)
+on the level cluster, and Configure Reporting profile-wide. The same byte, three
+unrelated meanings. `zcl.ClusterCommandName` therefore refuses to render one
+without its cluster, so a refusal cannot be reported against the wrong command.
+
+A command has no response of its own — the light simply acts — so the Default
+Response is the only evidence it arrived and was accepted. gzb leaves it
+enabled and waits for it, on the same reasoning as [being refused rather than
+ignored](#being-refused-rather-than-ignored).
+
+### A vocabulary rather than a flag
+
+`gzb light` takes words, not options:
+
+```console
+$ gzb light light1 red dim
+light1 (0xA489) endpoint 1
+  hue 0°, saturation 100%
+  level 63 (25%)
+  ok
+```
+
+The grammar is one rule: **a plain word is a place to go to, and its comparative
+is a distance to move.** `dim` puts a light at a quarter brightness; `dimmer`
+takes a quarter off wherever it happens to be now. The second is a ZCL Step
+command, so the device does the arithmetic against its own state — no read
+first, and saying it twice compounds.
+
+```
+on, off, toggle
+full, bright, half, dim, low, min, faint    a brightness to go to
+brighter, up, dimmer, darker, down          a step from where it is
+40%                                         a brightness to go to
+blue, cyan, green, magenta, orange,
+pink, purple, red, yellow                   a colour
+candle, cool, day, soft, warm, white        a white point
+#ff8800                                     a colour as sRGB
+2700k                                       a white point in kelvin
+hue:169/254                                 an exact hue and saturation
+level:127                                   an exact level
+```
+
+The last two are the escape hatch. `blue` is a colour someone chose; `hue:169`
+is the colour a lamp was actually found at, and the two are not the same thing
+when the job is to put a device back exactly as it was. They are what
+`make recapture-light` restores with.
+
+The parsing lives in `zigbee.ParseActions`, not in the flag parser, because the
+CLI is not the interesting caller. `light1 brighter` typed at a REPL prompt is
+the same phrase, and should not need a second implementation of the grammar to
+reach the same commands.
+
+### Asking the lamp rather than keeping a table of lamps
+
+Lights disagree about how to be told a colour. Some take hue and saturation,
+some take CIE 1931 xy, some can only move a white point along the Planckian
+locus. The generic answer is to ask: `ColorCapabilities` (`0x400A`) says what a
+lamp accepts, and the colour is converted at the last moment to suit.
+
+So a colour is held in a device-independent form and rendered on the way out —
+hue and saturation where the lamp has them, xy where it does not, a colour
+temperature where that is all there is. The conversions are the sRGB matrix and
+Kim et al.'s fit to the Planckian locus, and they are checked against the
+published chromaticities rather than against gzb's own output, because a wrong
+matrix is perfectly self-consistent:
+
+```
+red    (0.6401, 0.3300)      sRGB primary (0.640, 0.330)
+green  (0.3000, 0.6000)      sRGB primary (0.300, 0.600)
+blue   (0.1500, 0.0600)      sRGB primary (0.150, 0.060)
+warm   (0.4591, 0.4106)      2700 K on the Planckian locus
+```
+
+A lamp that can only do colour temperature is told that `red` is not something
+it can be, rather than being sent an approximation that arrives as beige.
+
+### Setting a light that is off
+
+`gzb light` sends Move to Level, not Move to Level (with On/Off). The
+distinction is the whole reason a motion light can be configured in daylight:
+the plain command sets how bright the lamp is without deciding whether it is
+lit, so a light that is off stays off.
+
+```console
+$ gzb light light1 red dim
+light1 (0xA489) endpoint 1
+  hue 0°, saturation 100%
+  level 63 (25%)
+  ok
+$ gzb read light1 on/off 0x0000
+light1 (0xA489) endpoint 1, on/off
+  waiting up to 5m0s; a battery device only listens while polling its parent
+  on/off                   false (bool)
+```
+
+That covers what the lamp is doing. What it will do next is a different
+attribute. When something other than gzb turns a light on — a motion sensor, a
+wall switch — the level it comes up at is `OnLevel` (`0x0011`), and `--persist`
+writes it:
+
+```console
+$ gzb light -persist light1 red dim
+light1 (0xA489) endpoint 1
+  hue 0°, saturation 100%
+  level 63 (25%)
+  on level 63 — what it returns to when something else switches it on
+  ok
+```
+
+Without it, a lamp switched on by its own sensor is free to come back at
+whatever level it last decided on. There is no equivalent standard attribute
+for a startup hue — colour is held in device NVM and restored, in practice, but
+the specification does not promise it, so the honest thing is to verify a
+colour survives a real off/on cycle rather than to assume it.
+
 ## Naming devices
 
 An IEEE address identifies a device but does not say what it is, and a network
@@ -773,6 +937,21 @@ That order — record, change, restore, verify — is not fussiness. Getting it
 wrong once here silenced a working sensor, and the silence was indistinguishable
 from a room whose temperature had not changed.
 
+A light is not a sensor, so it has its own capture with the same shape:
+
+```console
+$ make recapture-light LIGHT=light1
+$ make recapture-light LIGHT=light1 CONFIGURE=--configure
+```
+
+Nothing it runs turns a light on — every command it sends sets a colour or a
+level, both of which leave the on/off state alone — so it is safe against a
+light that is meant to stay dark. The state it records and puts back is a
+colour, a brightness and an `OnLevel` rather than a reporting configuration,
+and it restores them with the exact forms (`hue:0/254`, `level:63`) for the
+reason those exist: a restore that rounds a hue to the nearest named colour has
+not restored anything.
+
 ## Status
 
 Working and verified against hardware, with a real device paired:
@@ -803,8 +982,14 @@ Working and verified against hardware, with a real device paired:
 - Registry access and naming through the public API (`Devices`, `Device`,
   `SetName`, `ClearName`), safe from any goroutine alongside the readings loop
 - Outbound unicast, exercised by the Time cluster responder
+- Cluster-specific commands, which is what operating a device takes as opposed
+  to watching one: on/off, level and colour, with the colour command chosen
+  from what a lamp says it can be told rather than from a table of models
+- A light vocabulary — `red`, `dim`, `brighter`, `40%`, `2700k` — parsed once
+  in the `zigbee` package rather than in a flag parser, so a REPL and the CLI
+  can share it
 - `probe`, `network`, `permit-join`, `join`, `devices`, `name`, `monitor`,
-  `interview`, `read`, `write`, `reporting`, `config`
+  `interview`, `read`, `write`, `light`, `reporting`, `config`
 - Raw command escape hatch (`ezsp.Conn.Call`) for any unmodelled command
 
 Verified end to end with a SONOFF temperature/humidity sensor
@@ -822,9 +1007,9 @@ revert to its own default — both answered `ok`.
 
 Not built yet:
 
-- Cluster commands for lights, plugs and switches
 - Binding management
-- REPL mode
+- REPL mode, which the light grammar is shaped for: `ParseActions` takes the
+  words and nothing above it needs a flag parser
 
 
 ## usage

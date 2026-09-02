@@ -182,6 +182,7 @@ func Open(path string) (*Store, error) {
 	for _, device := range s.Devices {
 		migrateLegacyBatteryReading(device)
 		dropRecordedStatistics(device)
+		dropRawIlluminance(device)
 	}
 	s.path = path
 	return s, nil
@@ -202,6 +203,24 @@ func dropRecordedStatistics(device *Device) {
 	for _, name := range zcl.Statistics() {
 		delete(device.Readings, name)
 	}
+}
+
+// dropRawIlluminance removes illuminance readings recorded before gzb knew the
+// measurement was logarithmic.
+//
+// The Illuminance Measurement cluster sends 10000·log₁₀(lux)+1, and gzb stored
+// that number under "lx" as though it were already lux — so a registry written
+// before the fix holds figures like "15564 lx" for a room that was at 36. The
+// stored value cannot be converted in place, because a corrected entry is
+// indistinguishable from a raw one and would be converted a second time on the
+// next start. Dropping it costs one reading, which the next report replaces
+// with a true one; keeping it would leave a plausible wrong number in the
+// registry indefinitely.
+func dropRawIlluminance(device *Device) {
+	if device == nil {
+		return
+	}
+	delete(device.Readings, "illuminance")
 }
 
 // migrateLegacyBatteryReading splits the old ambiguous "battery" registry key

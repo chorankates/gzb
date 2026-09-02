@@ -1,4 +1,4 @@
-.PHONY: all test build run fuzz recapture
+.PHONY: all test build run fuzz recapture recapture-light
 
 all: test build
 
@@ -23,6 +23,14 @@ run:
 RECAPTURE_OUT ?= recapture.md
 recapture: build
 	@OUT="$(RECAPTURE_OUT)" ./scripts/recapture.sh "$(DEVICE)" $(CONFIGURE)
+
+# The light half of the same idea. Nothing it runs turns a light on, so it is
+# safe against a light that is meant to stay dark:
+#   make recapture-light LIGHT=light1
+#   make recapture-light LIGHT=light1 CONFIGURE=--configure
+RECAPTURE_LIGHT_OUT ?= recapture-light.md
+recapture-light: build
+	@OUT="$(RECAPTURE_LIGHT_OUT)" ./scripts/recapture-light.sh "$(LIGHT)" $(CONFIGURE)
 
 fuzz:
 	@go test -fuzz=FuzzDecode -fuzztime=10s ./internal/ash

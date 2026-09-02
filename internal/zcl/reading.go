@@ -104,10 +104,18 @@ func Interpret(cluster uint16, a Attribute) (Reading, bool) {
 // factor of a hundred into something a person notices.
 func Scale(cluster, attr uint16, raw float64) (Reading, bool) {
 	spec, ok := attributes[[2]uint16{cluster, attr}]
-	if !ok || spec.scale == 0 {
+	if !ok || !spec.measurement() {
 		return Reading{}, false
 	}
-	return Reading{Name: spec.name, Value: raw * spec.scale, Unit: spec.unit, Current: spec.current}, true
+	value := raw * spec.scale
+	if spec.convert != nil {
+		converted, ok := spec.convert(raw)
+		if !ok {
+			return Reading{}, false
+		}
+		value = converted
+	}
+	return Reading{Name: spec.name, Value: value, Unit: spec.unit, Current: spec.current}, true
 }
 
 // numeric converts a decoded attribute value to a float, if it is a number.

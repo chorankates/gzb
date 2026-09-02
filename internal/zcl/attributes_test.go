@@ -2,6 +2,7 @@ package zcl
 
 import (
 	"bytes"
+	"math"
 	"testing"
 )
 
@@ -313,7 +314,7 @@ func TestInterpretedNamesAreTheRegistryKeys(t *testing.T) {
 	}
 	got := make(map[string]bool)
 	for key, spec := range attributes {
-		if spec.scale == 0 || !spec.current {
+		if !spec.measurement() || !spec.current {
 			continue
 		}
 		got[spec.name] = true
@@ -362,7 +363,7 @@ func TestStatisticsNamesEveryScaledNonCurrentAttribute(t *testing.T) {
 		listed[name] = true
 	}
 	for key, spec := range attributes {
-		if spec.scale == 0 {
+		if !spec.measurement() {
 			continue
 		}
 		if spec.current == listed[spec.name] {
@@ -579,5 +580,50 @@ func TestReadReportingConfigResponseWalksDiscreteRecords(t *testing.T) {
 	}
 	if got[0].Change != nil {
 		t.Errorf("a discrete attribute carried a reportable change: % X", got[0].Change)
+	}
+}
+
+// Illuminance is the one measurement whose wire value is logarithmic, and gzb
+// read it as though it were lux for long enough to fill a registry with the
+// raw number. These are the specification's own worked figures: MeasuredValue
+// is 10000·log₁₀(lux)+1, so the decades land on round thousands.
+func TestIlluminanceIsLogarithmic(t *testing.T) {
+	for _, c := range []struct {
+		raw  float64
+		want float64
+	}{
+		{1, 1},          // 10^0
+		{10001, 10},     // 10^1
+		{20001, 100},    // 10^2
+		{40001, 10000},  // 10^4
+		{15564, 36.005}, // the value sitting in a real registry
+	} {
+		reading, ok := Scale(ClusterIlluminance, 0x0000, c.raw)
+		if !ok {
+			t.Errorf("raw %v has no interpretation", c.raw)
+			continue
+		}
+		if reading.Unit != "lx" {
+			t.Errorf("raw %v is in %q, want lx", c.raw, reading.Unit)
+		}
+		// A tenth of a percent is far tighter than the encoding's own
+		// resolution and still catches a wrong base or a dropped offset.
+		if math.Abs(reading.Value-c.want) > c.want*0.001 {
+			t.Errorf("raw %v = %.4f lx, want %.4f", c.raw, reading.Value, c.want)
+		}
+	}
+}
+
+// The sentinel is not a reading. Put through the formula it would claim three
+// million lux, which is brighter than direct sunlight and would be recorded
+// with a timestamp as though someone had measured it.
+func TestIlluminanceUnknownIsNotAReading(t *testing.T) {
+	if reading, ok := Scale(ClusterIlluminance, 0x0000, 0xFFFF); ok {
+		t.Errorf("the unknown sentinel interpreted as %v %s", reading.Value, reading.Unit)
+	}
+	// Zero means too dark to measure, which is a reading, and zero is the
+	// nearest honest number for it.
+	if reading, ok := Scale(ClusterIlluminance, 0x0000, 0); !ok || reading.Value != 0 {
+		t.Errorf("raw 0 = %+v (ok=%v), want 0 lx", reading, ok)
 	}
 }

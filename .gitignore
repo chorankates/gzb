@@ -6,5 +6,6 @@ pride-network.txt
 /gzb
 /zclreport
 
-# transcripts from scripts/recapture.sh
+# transcripts from scripts/recapture.sh and scripts/recapture-light.sh
 /recapture.md
+/recapture-light.md

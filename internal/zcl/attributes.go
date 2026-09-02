@@ -2,6 +2,7 @@ package zcl
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,11 +25,16 @@ type attributeSpec struct {
 	name string
 	typ  DataType
 	// unit and scale describe the physical quantity the attribute stands for.
-	// A zero scale means it is not a measurement — a model string, a bitmask,
-	// an interval — and Interpret leaves those alone rather than reporting a
-	// meaningless number.
+	// A zero scale and no convert means it is not a measurement — a model
+	// string, a bitmask, an interval — and Interpret leaves those alone
+	// rather than reporting a meaningless number.
 	unit  string
 	scale float64
+	// convert carries the quantities that are not a plain multiple of what
+	// the device sent, and takes precedence over scale where it is set. It
+	// reports false for a raw value that stands for no measurement at all,
+	// such as the sentinel a device sends when it has nothing to report.
+	convert func(raw float64) (float64, bool)
 	// current marks an attribute whose value is what the device is measuring
 	// or doing right now. Standing for a physical quantity is not the same
 	// thing: the coldest a sensor has been since it booted is a temperature in
@@ -86,7 +92,7 @@ var attributes = map[[2]uint16]attributeSpec{
 	{ClusterColorControl, 0x0007}: {name: "color temperature", typ: TypeUint16},
 	{ClusterColorControl, 0x0008}: {name: "color mode", typ: TypeEnum8},
 
-	{ClusterIlluminance, 0x0000}: {name: "illuminance", typ: TypeUint16, unit: "lx", scale: 1, current: true},
+	{ClusterIlluminance, 0x0000}: {name: "illuminance", typ: TypeUint16, unit: "lx", convert: illuminanceLux, current: true},
 
 	{ClusterTemperature, 0x0000}: {name: "temperature", typ: TypeInt16, unit: "°C", scale: 0.01, current: true},
 	{ClusterTemperature, 0x0001}: {name: "minimum measurable", typ: TypeInt16},
@@ -128,6 +134,39 @@ var attributes = map[[2]uint16]attributeSpec{
 	{ClusterSonoff, 0x200D}: {name: "humidity reference", typ: TypeUint16, unit: "%", scale: 0.01},
 }
 
+// measurement reports whether the attribute stands for a physical quantity at
+// all, by either route it can be described with.
+func (spec attributeSpec) measurement() bool {
+	return spec.scale != 0 || spec.convert != nil
+}
+
+// illuminanceUnknown is what the Illuminance Measurement cluster sends when it
+// has no reading to give. It is not a very bright room.
+const illuminanceUnknown = 0xFFFF
+
+// illuminanceLux turns the Illuminance Measurement cluster's MeasuredValue
+// into lux.
+//
+// This is the measurement in the ZCL that is not a plain multiple of what the
+// device sent: the wire carries 10000·log₁₀(lux)+1, a logarithmic encoding
+// that fits five decades of daylight into sixteen bits. Reading it as though
+// it were already lux is wrong by orders of magnitude in the direction that
+// looks plausible — a raw 15564 is 36 lx, not fifteen thousand — which is
+// exactly why it can sit in a registry unnoticed.
+func illuminanceLux(raw float64) (float64, bool) {
+	switch {
+	case raw <= 0:
+		// Zero is reserved for "too dark to measure", which is a reading, and
+		// the nearest honest number for it is zero.
+		return 0, true
+	case raw >= illuminanceUnknown:
+		// 0xFFFF means the device has nothing to report. Put through the
+		// formula it would claim three million lux with a straight face.
+		return 0, false
+	}
+	return math.Pow(10, (raw-1)/10000), true
+}
+
 // AttributeName renders a well-known attribute ID for a cluster.
 func AttributeName(cluster, attr uint16) string {
 	if spec, ok := attributes[[2]uint16{cluster, attr}]; ok {
@@ -159,7 +198,7 @@ func AttributeType(cluster, attr uint16) (DataType, bool) {
 func Statistics() []string {
 	var names []string
 	for _, spec := range attributes {
-		if spec.scale != 0 && !spec.current {
+		if spec.measurement() && !spec.current {
 			names = append(names, spec.name)
 		}
 	}
