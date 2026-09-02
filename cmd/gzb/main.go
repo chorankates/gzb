@@ -88,6 +88,8 @@ func run(args []string) error {
 		return cmdLight(ctx, &g, rest[1:])
 	case "reporting":
 		return cmdReporting(ctx, &g, rest[1:])
+	case "repl":
+		return cmdRepl(ctx, &g, rest[1:])
 	case "help", "-h", "--help":
 		usage(fs)
 		return nil
@@ -115,6 +117,7 @@ commands:
   write <dev> ...   set attributes on a device
   light <dev> ...   tell a light what to be, e.g. "light1 red dim"
   reporting <dev>   ask a device to report an attribute on its own
+  repl              take those commands at a prompt, with Tab completion
   monitor           print device reports as they arrive
   config            dump the NCP's configuration values (diagnostic)
   help              show this message

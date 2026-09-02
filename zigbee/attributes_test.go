@@ -682,3 +682,18 @@ func TestReportedStatisticIsAnEventRatherThanAReading(t *testing.T) {
 		t.Errorf("event described as %q, want it to name the statistic", events[0].Description)
 	}
 }
+
+// Every cluster gzb can name has to parse back from that name, or completion
+// would offer a word the command then rejects.
+func TestKnownClustersRoundTripThroughTheirNames(t *testing.T) {
+	clusters := KnownClusters()
+	if len(clusters) == 0 {
+		t.Fatal("KnownClusters is empty")
+	}
+	for _, id := range clusters {
+		parsed, ok := ParseCluster(ClusterName(id))
+		if !ok || parsed != id {
+			t.Errorf("cluster 0x%04X prints as %q, which parses back as 0x%04X (%v)", id, ClusterName(id), parsed, ok)
+		}
+	}
+}

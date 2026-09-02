@@ -254,6 +254,22 @@ type Action struct {
 	Color Color
 }
 
+// Cluster reports which cluster an action is sent to, which is also what a
+// device has to implement for the word to mean anything to it. A completion
+// of "light1 <tab>" uses this to offer "red" only to a lamp that carries the
+// Colour Control cluster, and "brighter" only to one that dims.
+func (a Action) Cluster() uint16 {
+	switch a.Verb {
+	case VerbOn, VerbOff, VerbToggle:
+		return ClusterOnOff
+	case VerbLevel, VerbStep:
+		return ClusterLevelControl
+	case VerbColor:
+		return ClusterColorControl
+	}
+	return 0
+}
+
 func (a Action) String() string {
 	switch a.Verb {
 	case VerbOn:

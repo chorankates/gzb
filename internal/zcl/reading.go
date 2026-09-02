@@ -1,6 +1,9 @@
 package zcl
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 // This file is the thin friendly layer over the raw decoder: it turns
 // (cluster, attribute, value) into something with a name and a unit.
@@ -53,6 +56,16 @@ var clusterNames = map[uint16]string{
 	ClusterIASZone:            "ias zone",
 	ClusterMetering:           "metering",
 	ClusterElectricalMeasure:  "electrical",
+}
+
+// KnownClusters lists the clusters that have a short name, in ID order.
+func KnownClusters() []uint16 {
+	ids := make([]uint16, 0, len(clusterNames))
+	for id := range clusterNames {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	return ids
 }
 
 // ClusterName renders a cluster ID, falling back to hex.

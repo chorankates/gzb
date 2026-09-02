@@ -82,6 +82,41 @@ func (d Device) Describe() string {
 	}
 }
 
+// Endpoint reports which endpoint implements the given input cluster, which
+// is where a command for that cluster has to be addressed. It is false for a
+// device that has not been interviewed, whose endpoints are simply unknown.
+func (d Device) Endpoint(cluster uint16) (uint8, bool) {
+	for _, ep := range d.Endpoints {
+		for _, in := range ep.Input {
+			if in.ID == cluster {
+				return ep.ID, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// LoadDevices reads the registry file without opening the adapter, for
+// anything that needs the device list and must not touch the port to get it:
+// a listing, a completion, or resolving a name before deciding whether a
+// command is worth dialling for. An empty path means the standard registry.
+//
+// It is a snapshot of the file at the moment it was read. A process holding
+// the port keeps its own copy and writes it back on its own schedule, so
+// while one is running the answer from Devices is the current one.
+func LoadDevices(registryPath string) ([]Device, error) {
+	db, err := store.Open(registryPath)
+	if err != nil {
+		return nil, err
+	}
+	list := db.List()
+	devices := make([]Device, 0, len(list))
+	for _, d := range list {
+		devices = append(devices, snapshotDevice(d))
+	}
+	return devices, nil
+}
+
 // Devices lists the registry, most recently seen first.
 func (c *Coordinator) Devices() []Device {
 	c.dbMu.Lock()

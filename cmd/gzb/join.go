@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"maps"
 	"os"
+	"slices"
 	"strconv"
 	"time"
 
@@ -250,18 +252,30 @@ flags:
 		return err
 	}
 
-	db, err := store.Open(*dbPath)
+	if g.json {
+		// The machine-readable form is the registry record itself, with
+		// everything the file holds.
+		db, err := store.Open(*dbPath)
+		if err != nil {
+			return err
+		}
+		return emitJSON(db.List())
+	}
+
+	devices, err := zigbee.LoadDevices(*dbPath)
 	if err != nil {
 		return err
 	}
-	devices := db.List()
+	printDevices(devices, registryPath(*dbPath))
+	return nil
+}
 
-	if g.json {
-		return emitJSON(devices)
-	}
+// printDevices lists what is known about each device: its identity, when it
+// was last heard from, and the last thing it said.
+func printDevices(devices []zigbee.Device, path string) {
 	if len(devices) == 0 {
-		fmt.Printf("No devices recorded in %s.\n\nRun `gzb join 60` and pair a device.\n", db.Path())
-		return nil
+		fmt.Printf("No devices recorded in %s.\n\nRun `gzb join 60` and pair a device.\n", path)
+		return
 	}
 
 	var unnamed int
@@ -273,39 +287,61 @@ flags:
 		if d.Name == "" {
 			unnamed++
 		}
-		fmt.Println(deviceHeading(d))
+		fmt.Println(heading(d.Describe(), d.IEEE, d.NodeID))
 		fmt.Printf("  %s, last seen %s\n", kind, d.LastSeen.Format(time.RFC3339))
 		if d.InheritedFrom != "" {
 			// A record deduced from an identical device must not read like one
 			// the device gave itself.
 			from := d.InheritedFrom
-			if peer, ok := db.Get(d.InheritedFrom); ok {
-				from = peer.Describe()
+			for _, peer := range devices {
+				if peer.IEEE == d.InheritedFrom {
+					from = peer.Describe()
+					break
+				}
 			}
 			fmt.Printf("  endpoints inherited from %s, which has the same model\n", from)
 		}
-		for _, name := range d.ReadingNames() {
-			r := d.Readings[name]
-			fmt.Printf("  %-14s %-12s (%s)\n", name, r, r.At.Format(time.RFC3339))
+		for _, name := range slices.Sorted(maps.Keys(d.Latest)) {
+			r := d.Latest[name]
+			fmt.Printf("  %-14s %-12s (%s)\n", name, formatLatest(r), r.At.Format(time.RFC3339))
 		}
 		fmt.Println()
 	}
-	fmt.Printf("%d device(s) in %s\n", len(devices), db.Path())
+	fmt.Printf("%d device(s) in %s\n", len(devices), path)
 	if unnamed > 0 {
 		fmt.Printf("%d unnamed. `gzb name <device> living room thermo` makes the rest of the output readable.\n", unnamed)
 	}
-	return nil
+}
+
+// formatLatest renders the last known value of one quantity.
+func formatLatest(r zigbee.LatestReading) string {
+	if r.Unit == "" {
+		return fmt.Sprintf("%g", r.Value)
+	}
+	return fmt.Sprintf("%.2f %s", r.Value, r.Unit)
 }
 
 // deviceHeading is the first line of a device listing: what to call the device,
 // then the addresses that identify it.
+func deviceHeading(d *store.Device) string {
+	return heading(d.Describe(), d.IEEE, d.NodeID)
+}
+
+// heading is the first line of a device listing: what to call the device,
+// then the addresses that identify it.
 //
 // The addresses stay even when there is a name, because a name is a convenience
 // and the IEEE address is the identity — anything that has to be matched
-// against another tool's output is matched on the address.
-func deviceHeading(d *store.Device) string {
-	if name := d.Describe(); name != d.IEEE {
-		return fmt.Sprintf("%s  %s  %s", name, d.NodeIDHex(), d.IEEE)
+// against another tool's output is matched on the address. A device known
+// only by network address has nothing more to add than the address itself.
+func heading(name, ieee string, node uint16) string {
+	hex := fmt.Sprintf("0x%04X", node)
+	switch {
+	case ieee == "":
+		return fmt.Sprintf("%s  %s", name, hex)
+	case name != ieee:
+		return fmt.Sprintf("%s  %s  %s", name, hex, ieee)
+	default:
+		return fmt.Sprintf("%s  %s", ieee, hex)
 	}
-	return fmt.Sprintf("%s  %s", d.IEEE, d.NodeIDHex())
 }

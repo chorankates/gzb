@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -20,15 +19,26 @@ import (
 // it is lost. Waiting five minutes for one would only hide that.
 const defaultLightTimeout = 20 * time.Second
 
-func cmdLight(ctx context.Context, g *globals, args []string) error {
-	fs := flag.NewFlagSet("light", flag.ContinueOnError)
-	dbPath := fs.String("db", "", "device registry file (default: "+store.DefaultPath()+")")
-	endpoint := fs.Int("endpoint", 0, "endpoint to address (default: whichever one has the light clusters)")
-	timeout := fs.Duration("timeout", defaultLightTimeout, "how long to wait for the light to answer")
-	transition := fs.Duration("transition", 0, "how long the light should take to get there")
-	persist := fs.Bool("persist", false, "also set the brightness the light returns to when something else turns it on")
-	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, `usage: gzb light [flags] <device> <what>...
+// lightFlags are the flags `light` takes wherever it is typed: on the command
+// line, or at the prompt of a session already holding the port.
+type lightFlags struct {
+	endpoint   *int
+	timeout    *time.Duration
+	transition *time.Duration
+	persist    *bool
+}
+
+func addLightFlags(fs *flag.FlagSet) lightFlags {
+	return lightFlags{
+		endpoint:   fs.Int("endpoint", 0, "endpoint to address (default: whichever one has the light clusters)"),
+		timeout:    fs.Duration("timeout", defaultLightTimeout, "how long to wait for the light to answer"),
+		transition: fs.Duration("transition", 0, "how long the light should take to get there"),
+		persist:    fs.Bool("persist", false, "also set the brightness the light returns to when something else turns it on"),
+	}
+}
+
+func lightUsage(fs *flag.FlagSet) {
+	fmt.Fprintf(fs.Output(), `usage: gzb light [flags] <device> <what>...
 
 Tells a light what to be. Several things may be said at once, and they are
 carried out in the order given.
@@ -66,8 +76,14 @@ being turned off and on again by something that is not gzb.
 
 flags:
 `, strings.Join(zigbee.ColorNames(), ", "), strings.Join(zigbee.WhitePointNames(), ", "))
-		fs.PrintDefaults()
-	}
+	fs.PrintDefaults()
+}
+
+func cmdLight(ctx context.Context, g *globals, args []string) error {
+	fs := flag.NewFlagSet("light", flag.ContinueOnError)
+	dbPath := fs.String("db", "", "device registry file (default: "+store.DefaultPath()+")")
+	f := addLightFlags(fs)
+	fs.Usage = func() { lightUsage(fs) }
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -80,7 +96,11 @@ flags:
 	if err != nil {
 		return err
 	}
-	light, name, err := resolveLight(*dbPath, fs.Arg(0), *endpoint)
+	devices, err := zigbee.LoadDevices(*dbPath)
+	if err != nil {
+		return err
+	}
+	light, name, err := resolveLight(devices, fs.Arg(0), *f.endpoint)
 	if err != nil {
 		return err
 	}
@@ -91,17 +111,23 @@ flags:
 	}
 	defer coordinator.Close()
 
-	ctx, cancel := context.WithTimeout(ctx, *timeout)
+	return runLight(ctx, g, coordinator, name, light, actions, f)
+}
+
+// runLight tells a light what to be, through a coordinator that is already
+// open. It is the half of the command a session shares with the command line.
+func runLight(ctx context.Context, g *globals, coordinator *zigbee.Coordinator, name string, light zigbee.Light, actions []zigbee.Action, f lightFlags) error {
+	ctx, cancel := context.WithTimeout(ctx, *f.timeout)
 	defer cancel()
 
 	if !g.json {
 		printLightPlan(name, light, actions)
 	}
 
-	if err := coordinator.Apply(ctx, light, actions, *transition); err != nil {
+	if err := coordinator.Apply(ctx, light, actions, *f.transition); err != nil {
 		return err
 	}
-	if *persist {
+	if *f.persist {
 		level, ok := lastAbsoluteLevel(actions)
 		if !ok {
 			return fmt.Errorf("--persist needs an absolute brightness to persist, not just a step (say `dim` or `25%%`, not `dimmer`)")
@@ -168,33 +194,4 @@ func lastAbsoluteLevel(actions []zigbee.Action) (uint8, bool) {
 		}
 	}
 	return 0, false
-}
-
-// resolveLight turns a device argument into a light: a node, and the endpoint
-// its control clusters are on.
-//
-// The endpoint is found by asking which one carries the light clusters, in
-// order of how definitive they are. A device with several endpoints — a
-// two-gang switch, a lamp with a sensor on a second endpoint — is why this is
-// worth doing rather than assuming endpoint 1.
-func resolveLight(dbPath, deviceArg string, endpoint int) (zigbee.Light, string, error) {
-	target, name, err := resolveTarget(dbPath, deviceArg, zigbee.ClusterOnOff, endpoint)
-	if err != nil {
-		return zigbee.Light{}, "", err
-	}
-	light := zigbee.Light{Node: target.Node, Endpoint: target.Endpoint}
-	if endpoint != 0 {
-		return light, name, nil
-	}
-	// resolveTarget already found the on/off endpoint if the registry knew
-	// one. Where it did not, a lamp that has been interviewed may still say
-	// which endpoint dims or colours, and either is a better guess than 1.
-	for _, cluster := range []uint16{zigbee.ClusterLevelControl, zigbee.ClusterColorControl} {
-		found, _, err := resolveTarget(dbPath, deviceArg, cluster, 0)
-		if err == nil && found.Endpoint != firstAppEndpoint {
-			light.Endpoint = found.Endpoint
-			break
-		}
-	}
-	return light, name, nil
 }

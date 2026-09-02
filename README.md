@@ -34,7 +34,8 @@ grow their own EZSP/ZCL loop:
 
 ```
 cmd/gzb            CLI: probe, network, join, monitor, devices, name,
-                        interview, read, write, reporting
+                        interview, read, write, reporting, light, and
+                        repl, which takes the same commands at a prompt
   zigbee           public coordinator API: readings, discovery, attributes,
                         reporting, permit-join, join watching, the device
                         registry and naming, Time
@@ -173,6 +174,7 @@ $ gzb name --clear "living room thermo"  # forget one
 $ gzb monitor                            # print readings until Ctrl-C
 $ gzb monitor --for 60s --raw            # ...bounded, including undecoded frames
 $ gzb config                             # dump NCP configuration (diagnostic)
+$ gzb repl                               # the device commands at a prompt, with Tab
 ```
 
 `join` is the one to use when pairing. `permit-join` opens the window and
@@ -750,7 +752,8 @@ when the job is to put a device back exactly as it was. They are what
 The parsing lives in `zigbee.ParseActions`, not in the flag parser, because the
 CLI is not the interesting caller. `light1 brighter` typed at a REPL prompt is
 the same phrase, and should not need a second implementation of the grammar to
-reach the same commands.
+reach the same commands. [The prompt](#a-prompt-for-the-tab-key) is that
+caller, and it does not.
 
 ### Asking the lamp rather than keeping a table of lamps
 
@@ -814,6 +817,83 @@ whatever level it last decided on. There is no equivalent standard attribute
 for a startup hue — colour is held in device NVM and restored, in practice, but
 the specification does not promise it, so the honest thing is to verify a
 colour survives a real off/on cycle rather than to assume it.
+
+## A prompt, for the Tab key
+
+Every command above opens the adapter, resets it, waits for the network to come
+back and closes it again: a second or two each, so a light told three things is
+told them three seconds apart. `gzb repl` pays that once and takes the same
+commands at a prompt. The reason it exists, though, is completion:
+
+```console
+$ gzb repl
+gzb on /dev/ttyUSB0: 11 device(s) in the registry, 8 interviewed.
+Tab completes; `help` lists commands; Ctrl-D quits.
+
+gzb> light <Tab><Tab>
+  light1  light2
+gzb> light 1 <Tab>
+  blue      cool      dim       full      magenta   orange    soft      white
+  bright    cyan      dimmer    green     min       pink      toggle    yellow
+  brighter  darker    down      half      off       purple    up
+  candle    day       faint     low       on        red       warm
+gzb> light 1 toggle
+light1 (0xA489) endpoint 1
+  toggle
+  ok
+gzb> read "living room thermo" <Tab>
+  0x0020       0xFC57       humidity     power
+  0xFC11       basic        identify     temperature
+```
+
+What Tab offers is drawn from the interviews, not from a list. `light` offers
+the devices whose interview found the On/Off cluster; `light 1` offers the
+words that light understands — the colours because it has Colour Control,
+`brighter` because it has Level Control, where a plain plug would get `on`,
+`off` and `toggle` and nothing about red. `read <device>` offers the clusters
+that device's interview found, by name where gzb has one and as hex where it
+does not, and after one of those the attributes gzb knows on it, minus any
+already typed. A device nothing has interviewed is not offered as a light,
+because nothing is known about it; `interview` it and it is.
+
+A shell completion script could not do this without re-deriving the registry
+and the attribute table in another language, which is exactly the context that
+is easy to put in the wrong place. Here the completer is the code that runs the
+command: the grammar is written down once, as data — this argument is a device,
+that one a cluster the device carries, the rest attributes on it — and
+completing a command and running it cannot disagree about what it takes.
+
+`light 1` means light1. A device argument is resolved first among the devices
+that carry the command's cluster and only then across the whole registry, so
+`1` — ambiguous among light1, emylo1 and outside #1 thermo — is unambiguous
+among the lights. The command line resolves the same way, so `gzb light 1 off`
+works there too. Nothing that resolved before stops resolving: the whole
+registry is still tried when the scope has no match, and an ambiguity is still
+an error naming the candidates rather than a guess.
+
+Names with spaces complete with their quotes — `read liv<Tab>` becomes
+`read "living room thermo" ` — and double quotes are the prompt's only quoting,
+because it is not a shell. History persists in a file beside the registry.
+Reports keep being recorded to the registry for as long as the session is open,
+and `monitor` prints them until Enter. Ctrl-C interrupts a command that is
+waiting on a sleepy device without ending the session — in raw mode no signal
+arrives, so the session reads the key itself — and quits at an empty prompt.
+
+Without a terminal the same commands are read one per line from standard
+input, which is how the state of a light is recorded and checked after a test:
+
+```console
+$ printf 'read 1 on/off on/off\nread 1 level level\n' | gzb repl
+```
+
+The line editor is `golang.org/x/term`, the Go project's own, which does raw
+mode, history and a Tab hook. Two things it does not do are done here. It holds
+its lock while asking about a key, so a list of candidates cannot go through
+it; the list is written straight to the terminal and the prompt and line are
+redrawn exactly as the editor drew them, cursor included, which is the only
+thing the editor keeps track of. And raw mode stops the terminal turning `\n`
+into `\r\n`, which every printer in gzb relies on, so that one translation is
+put back with a `termios` call after `MakeRaw`.
 
 ## Naming devices
 
@@ -989,7 +1069,12 @@ Working and verified against hardware, with a real device paired:
   in the `zigbee` package rather than in a flag parser, so a REPL and the CLI
   can share it
 - `probe`, `network`, `permit-join`, `join`, `devices`, `name`, `monitor`,
-  `interview`, `read`, `write`, `light`, `reporting`, `config`
+  `interview`, `read`, `write`, `light`, `reporting`, `config`, `repl`
+- A prompt with Tab completion drawn from the interviews: the lights, the
+  words each light understands, a device's clusters and their attributes —
+  driven through a pseudo-terminal against the real network, lights toggled
+  and put back
+- Device resolution scoped to the command's cluster, so `light 1` is light1
 - Raw command escape hatch (`ezsp.Conn.Call`) for any unmodelled command
 
 Verified end to end with a SONOFF temperature/humidity sensor
@@ -1008,8 +1093,7 @@ revert to its own default — both answered `ok`.
 Not built yet:
 
 - Binding management
-- REPL mode, which the light grammar is shaped for: `ParseActions` takes the
-  words and nothing above it needs a flag parser
+- Pairing from the prompt: `join` is still a command-line affair
 
 
 ## usage

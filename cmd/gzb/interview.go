@@ -2,11 +2,11 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/chorankates/gzb/internal/store"
 	"github.com/chorankates/gzb/zigbee"
@@ -17,14 +17,23 @@ import (
 // the zigbee package; what is left here is resolving which device to ask and
 // presenting the answer.
 
-func cmdInterview(ctx context.Context, g *globals, args []string) error {
-	fs := flag.NewFlagSet("interview", flag.ContinueOnError)
-	dbPath := fs.String("db", "", "device registry file (default: "+store.DefaultPath()+")")
-	timeout := fs.Duration("timeout", zigbee.DefaultInterviewTimeout, "how long to wait for each reply")
-	all := fs.Bool("all", false, "interview every device the registry has not interviewed yet")
-	full := fs.Bool("full", false, "ask every question again, of a device already interviewed")
-	fs.Usage = func() {
-		fmt.Fprint(os.Stderr, `usage: gzb interview [flags] [device]
+// interviewFlags are the flags `interview` takes.
+type interviewFlags struct {
+	timeout *time.Duration
+	all     *bool
+	full    *bool
+}
+
+func addInterviewFlags(fs *flag.FlagSet) interviewFlags {
+	return interviewFlags{
+		timeout: fs.Duration("timeout", zigbee.DefaultInterviewTimeout, "how long to wait for each reply"),
+		all:     fs.Bool("all", false, "interview every device the registry has not interviewed yet"),
+		full:    fs.Bool("full", false, "ask every question again, of a device already interviewed"),
+	}
+}
+
+func interviewUsage(fs *flag.FlagSet) {
+	fmt.Fprint(fs.Output(), `usage: gzb interview [flags] [device]
 
 Asks a device what it is: node descriptor, power descriptor, endpoints, the
 clusters each endpoint implements, and its manufacturer and model. Results are
@@ -51,32 +60,29 @@ replaces it.
 
 flags:
 `)
-		fs.PrintDefaults()
-	}
+	fs.PrintDefaults()
+}
+
+func cmdInterview(ctx context.Context, g *globals, args []string) error {
+	fs := flag.NewFlagSet("interview", flag.ContinueOnError)
+	dbPath := fs.String("db", "", "device registry file (default: "+store.DefaultPath()+")")
+	f := addInterviewFlags(fs)
+	fs.Usage = func() { interviewUsage(fs) }
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() > 1 || (fs.NArg() == 0 && !*all) {
+	if fs.NArg() > 1 || (fs.NArg() == 0 && !*f.all) {
 		fs.Usage()
 		return flag.ErrHelp
 	}
 
-	targets, done, err := interviewTargets(*dbPath, fs.Args(), *all, *full)
+	devices, err := zigbee.LoadDevices(*dbPath)
 	if err != nil {
 		return err
 	}
-	if len(targets) == 0 {
-		// Nothing left to ask is a finished job, not a failure. Say so before
-		// opening the port, so the adapter is not touched for no reason.
-		if g.json {
-			return emitJSON([]zigbee.Description{})
-		}
-		fmt.Printf("All %d device(s) in the registry have been interviewed.\n"+
-			"`gzb interview --all --full` asks them again.\n", done)
-		return nil
-	}
-	if done > 0 && !g.json {
-		fmt.Printf("%d device(s) already interviewed, skipping; --full asks them again.\n\n", done)
+	targets, err := interviewPlan(g, devices, fs.Args(), *f.all, *f.full)
+	if err != nil || len(targets) == 0 {
+		return err
 	}
 
 	coordinator, err := zigbee.Open(ctx, coordinatorOptions(g, *dbPath))
@@ -85,7 +91,34 @@ flags:
 	}
 	defer coordinator.Close()
 
-	opts := zigbee.InterviewOptions{Timeout: *timeout, Full: *full}
+	return runInterview(ctx, g, coordinator, targets, zigbee.InterviewOptions{Timeout: *f.timeout, Full: *f.full})
+}
+
+// interviewPlan resolves what an interview run will ask and says what it is
+// skipping. It reports no targets, and no error, when there is nothing left
+// to ask: that is a finished job rather than a failure, and it is settled
+// before the port is opened so the adapter is not touched for no reason.
+func interviewPlan(g *globals, devices []zigbee.Device, args []string, all, full bool) ([]interviewTarget, error) {
+	targets, done, err := interviewTargets(devices, args, all, full)
+	if err != nil {
+		return nil, err
+	}
+	if len(targets) == 0 {
+		if g.json {
+			return nil, emitJSON([]zigbee.Description{})
+		}
+		fmt.Printf("All %d device(s) in the registry have been interviewed.\n"+
+			"`gzb interview --all --full` asks them again.\n", done)
+		return nil, nil
+	}
+	if done > 0 && !g.json {
+		fmt.Printf("%d device(s) already interviewed, skipping; --full asks them again.\n\n", done)
+	}
+	return targets, nil
+}
+
+// runInterview asks each target what it is, through an open coordinator.
+func runInterview(ctx context.Context, g *globals, coordinator *zigbee.Coordinator, targets []interviewTarget, opts zigbee.InterviewOptions) error {
 	if !g.json {
 		// An interview of a sleepy device can wait a long time with nothing
 		// to show, so say what it is waiting for.
@@ -182,20 +215,10 @@ type interviewTarget struct {
 	node uint16
 }
 
-// interviewTargets resolves command-line arguments to devices, returning what
-// to ask and how many devices were left out because they have already answered.
-//
-// This reads the registry but never writes it: the coordinator keeps its own
-// copy and saves what the interview learns, so a second writer here would
-// overwrite those results.
-func interviewTargets(dbPath string, args []string, all, full bool) ([]interviewTarget, int, error) {
-	db, err := store.Open(dbPath)
-	if err != nil {
-		return nil, 0, err
-	}
-
+// interviewTargets resolves the arguments to devices, returning what to ask
+// and how many devices were left out because they have already answered.
+func interviewTargets(devices []zigbee.Device, args []string, all, full bool) ([]interviewTarget, int, error) {
 	if all {
-		devices := db.List()
 		if len(devices) == 0 {
 			return nil, 0, fmt.Errorf("no devices in the registry; run `gzb join 90` and pair one")
 		}
@@ -215,23 +238,14 @@ func interviewTargets(dbPath string, args []string, all, full bool) ([]interview
 	}
 
 	// A device named outright is asked whatever the registry already holds:
-	// naming it is the request.
-	arg := args[0]
-	d, err := db.Resolve(arg)
-	if err == nil {
-		return []interviewTarget{{name: d.Describe(), node: d.NodeID}}, 0, nil
-	}
-	// An ambiguous name is a question for the user, not something to fall back
-	// from — only "I have never heard of this" is worth trying another way.
-	if !errors.Is(err, store.ErrNoDevice) {
+	// naming it is the request. A bare hex address the registry does not know
+	// is asked too, which is how a device that joined while nothing was
+	// listening gets interviewed.
+	r, err := resolveDevice(devices, args[0], 0)
+	if err != nil {
 		return nil, 0, err
 	}
-	// A bare hex address addresses a device the registry may not know, which is
-	// how a device that joined while nothing was listening gets interviewed.
-	if node, ok := store.ParseNodeID(arg); ok {
-		return []interviewTarget{{name: arg, node: node}}, 0, nil
-	}
-	return nil, 0, resolveError(err)
+	return []interviewTarget{{name: r.name, node: r.node}}, 0, nil
 }
 
 func printInterview(description zigbee.Description) {

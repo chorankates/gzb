@@ -88,16 +88,7 @@ flags:
 				}
 				continue
 			}
-			name := reading.DeviceName
-			if name == "" {
-				name = reading.IEEE
-			}
-			if name == "" {
-				name = fmt.Sprintf("0x%04X", reading.NodeID)
-			}
-			fmt.Printf("%s  %-24s %-12s %8.2f %-3s  lqi %3d  rssi %d\n",
-				reading.At.Format("15:04:05"), name, reading.Capability,
-				reading.Value, reading.Unit, reading.LQI, reading.RSSI)
+			fmt.Println(formatReading(reading))
 		case err, ok := <-errs:
 			if !ok {
 				errs = nil
@@ -115,4 +106,18 @@ flags:
 		}
 	}
 	return terminalErr
+}
+
+// formatReading renders one report as a monitor line: when, who, what.
+func formatReading(reading zigbee.Reading) string {
+	name := reading.DeviceName
+	if name == "" {
+		name = reading.IEEE
+	}
+	if name == "" {
+		name = fmt.Sprintf("0x%04X", reading.NodeID)
+	}
+	return fmt.Sprintf("%s  %-24s %-12s %8.2f %-3s  lqi %3d  rssi %d",
+		reading.At.Format("15:04:05"), name, reading.Capability,
+		reading.Value, reading.Unit, reading.LQI, reading.RSSI)
 }

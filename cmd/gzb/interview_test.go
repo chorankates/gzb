@@ -28,6 +28,17 @@ func registryWith(t *testing.T, devices ...*store.Device) string {
 	return path
 }
 
+// devicesAt reads a registry file back as the device list commands resolve
+// against.
+func devicesAt(t *testing.T, path string) []zigbee.Device {
+	t.Helper()
+	devices, err := zigbee.LoadDevices(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return devices
+}
+
 func uninterviewed(ieee string, node uint16, name string) *store.Device {
 	return &store.Device{IEEE: ieee, NodeID: node, Name: name, LastSeen: time.Now()}
 }
@@ -57,7 +68,7 @@ func TestAllSkipsDevicesAlreadyInterviewed(t *testing.T) {
 		uninterviewed("A4:C1:38:00:00:00:00:03", 0x3333, "door1"),
 	)
 
-	targets, done, err := interviewTargets(path, nil, true, false)
+	targets, done, err := interviewTargets(devicesAt(t, path), nil, true, false)
 	if err != nil {
 		t.Fatalf("interviewTargets: %v", err)
 	}
@@ -81,7 +92,7 @@ func TestFullAsksEveryDeviceAgain(t *testing.T) {
 		uninterviewed("A4:C1:38:00:00:00:00:02", 0x2222, "bedroom thermo"),
 	)
 
-	targets, done, err := interviewTargets(path, nil, true, true)
+	targets, done, err := interviewTargets(devicesAt(t, path), nil, true, true)
 	if err != nil {
 		t.Fatalf("interviewTargets: %v", err)
 	}
@@ -101,7 +112,7 @@ func TestAllWithEverythingInterviewedHasNothingToAsk(t *testing.T) {
 		interviewed("A4:C1:38:00:00:00:00:02", 0x2222, "bedroom thermo"),
 	)
 
-	targets, done, err := interviewTargets(path, nil, true, false)
+	targets, done, err := interviewTargets(devicesAt(t, path), nil, true, false)
 	if err != nil {
 		t.Fatalf("interviewTargets: %v", err)
 	}
@@ -114,7 +125,7 @@ func TestAllWithEverythingInterviewedHasNothingToAsk(t *testing.T) {
 }
 
 func TestAllOnAnEmptyRegistryIsAnError(t *testing.T) {
-	if _, _, err := interviewTargets(registryWith(t), nil, true, false); err == nil {
+	if _, _, err := interviewTargets(devicesAt(t, registryWith(t)), nil, true, false); err == nil {
 		t.Error("interviewTargets on an empty registry returned no error")
 	}
 }
@@ -124,7 +135,7 @@ func TestAllOnAnEmptyRegistryIsAnError(t *testing.T) {
 func TestANamedDeviceIsAskedEvenWhenAlreadyInterviewed(t *testing.T) {
 	path := registryWith(t, interviewed("A4:C1:38:00:00:00:00:01", 0x1111, "living room thermo"))
 
-	targets, done, err := interviewTargets(path, []string{"living room thermo"}, false, false)
+	targets, done, err := interviewTargets(devicesAt(t, path), []string{"living room thermo"}, false, false)
 	if err != nil {
 		t.Fatalf("interviewTargets: %v", err)
 	}

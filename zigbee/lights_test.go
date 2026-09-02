@@ -30,6 +30,31 @@ func TestPlainWordsAreAbsoluteAndComparativesAreRelative(t *testing.T) {
 	}
 }
 
+// Completion offers a word only to a lamp that carries the cluster the word
+// is sent on, so every word has to say which cluster that is.
+func TestEveryActionWordNamesItsCluster(t *testing.T) {
+	for _, w := range ActionWords() {
+		action, ok := ParseAction(w)
+		if !ok {
+			// The patterns — N%, #rrggbb — are placeholders, not words.
+			continue
+		}
+		if action.Cluster() == 0 {
+			t.Errorf("%q is sent on no cluster", w)
+		}
+	}
+	for word, want := range map[string]uint16{
+		"on": ClusterOnOff, "toggle": ClusterOnOff,
+		"dim": ClusterLevelControl, "brighter": ClusterLevelControl, "40%": ClusterLevelControl,
+		"red": ClusterColorControl, "warm": ClusterColorControl, "2700k": ClusterColorControl,
+	} {
+		action, ok := ParseAction(word)
+		if !ok || action.Cluster() != want {
+			t.Errorf("%q goes to cluster 0x%04X, want 0x%04X", word, action.Cluster(), want)
+		}
+	}
+}
+
 func TestParseActionsReadsAWholePhrase(t *testing.T) {
 	actions, err := ParseActions([]string{"on", "red", "25%"})
 	if err != nil {

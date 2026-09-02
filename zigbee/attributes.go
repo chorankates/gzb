@@ -601,6 +601,11 @@ func ScaleValue(cluster, attr uint16, raw float64) (value float64, unit string, 
 	return reading.Value, reading.Unit, ok
 }
 
+// KnownClusters lists the clusters gzb has a name for, in ID order. It is the
+// vocabulary ParseCluster accepts by name, which is what a completion offers
+// for a device whose own cluster list has not been asked for yet.
+func KnownClusters() []uint16 { return zcl.KnownClusters() }
+
 // KnownAttributes lists the attributes gzb knows on a cluster, in ID order.
 // It is a reasonable default for a read that names a cluster and no attribute,
 // but it is only what gzb happens to know: a device may implement more, and

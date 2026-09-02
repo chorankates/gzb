@@ -2,10 +2,8 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -16,8 +14,10 @@ import (
 
 // Reading, writing and configuring reports all address the same thing — one
 // cluster on one endpoint of one device — and all three have to turn what a
-// person typed into it. That resolution is the bulk of this file; the queries
-// themselves live in the zigbee package.
+// person typed into it. Each command is split in two: the half that parses
+// what was typed, and the half that runs it through an open coordinator. The
+// command line does both in turn; a session that already holds the port
+// parses at its prompt and runs against the coordinator it has.
 
 // defaultRequestTimeout is how long to wait for an answer.
 //
@@ -38,13 +38,22 @@ const (
 	lastAppEndpoint  = 240
 )
 
-func cmdRead(ctx context.Context, g *globals, args []string) error {
-	fs := flag.NewFlagSet("read", flag.ContinueOnError)
-	dbPath := fs.String("db", "", "device registry file (default: "+store.DefaultPath()+")")
-	endpoint := fs.Int("endpoint", 0, "endpoint to address (default: whichever one has the cluster)")
-	timeout := fs.Duration("timeout", defaultRequestTimeout, "how long to wait for the reply")
-	fs.Usage = func() {
-		fmt.Fprint(os.Stderr, `usage: gzb read [flags] <device> <cluster> [attribute...]
+// targetFlags are the flags every command addressing one cluster on one
+// device takes.
+type targetFlags struct {
+	endpoint *int
+	timeout  *time.Duration
+}
+
+func addTargetFlags(fs *flag.FlagSet, timeout time.Duration) targetFlags {
+	return targetFlags{
+		endpoint: fs.Int("endpoint", 0, "endpoint to address (default: whichever one has the cluster)"),
+		timeout:  fs.Duration("timeout", timeout, "how long to wait for the reply"),
+	}
+}
+
+func readUsage(fs *flag.FlagSet) {
+	fmt.Fprint(fs.Output(), `usage: gzb read [flags] <device> <cluster> [attribute...]
 
 Asks a device for the current value of some attributes, rather than waiting for
 it to report them.
@@ -67,8 +76,14 @@ their parent, so a read can take a while or time out entirely.
 
 flags:
 `)
-		fs.PrintDefaults()
-	}
+	fs.PrintDefaults()
+}
+
+func cmdRead(ctx context.Context, g *globals, args []string) error {
+	fs := flag.NewFlagSet("read", flag.ContinueOnError)
+	dbPath := fs.String("db", "", "device registry file (default: "+store.DefaultPath()+")")
+	f := addTargetFlags(fs, defaultRequestTimeout)
+	fs.Usage = func() { readUsage(fs) }
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -77,19 +92,15 @@ flags:
 		return flag.ErrHelp
 	}
 
-	cluster, ok := zigbee.ParseCluster(fs.Arg(1))
-	if !ok {
-		return unknownCluster(fs.Arg(1))
-	}
-	attrs, err := parseAttributes(cluster, fs.Args()[2:])
+	cluster, attrs, err := parseReadArgs(fs.Args()[1:])
 	if err != nil {
 		return err
 	}
-	if len(attrs) == 0 {
-		return fmt.Errorf("gzb knows no attributes on cluster %s; name one, e.g. 0x0000", zigbee.ClusterName(cluster))
+	devices, err := zigbee.LoadDevices(*dbPath)
+	if err != nil {
+		return err
 	}
-
-	target, name, err := resolveTarget(*dbPath, fs.Arg(0), cluster, *endpoint)
+	target, name, err := resolveTarget(devices, fs.Arg(0), cluster, *f.endpoint)
 	if err != nil {
 		return err
 	}
@@ -100,12 +111,34 @@ flags:
 	}
 	defer coordinator.Close()
 
-	ctx, cancel := context.WithTimeout(ctx, *timeout)
+	return runRead(ctx, g, coordinator, name, target, attrs, *f.timeout)
+}
+
+// parseReadArgs reads a cluster and the attributes to ask for on it, falling
+// back to everything gzb knows on the cluster when none were named.
+func parseReadArgs(args []string) (uint16, []uint16, error) {
+	cluster, ok := zigbee.ParseCluster(args[0])
+	if !ok {
+		return 0, nil, unknownCluster(args[0])
+	}
+	attrs, err := parseAttributes(cluster, args[1:])
+	if err != nil {
+		return 0, nil, err
+	}
+	if len(attrs) == 0 {
+		return 0, nil, fmt.Errorf("gzb knows no attributes on cluster %s; name one, e.g. 0x0000", zigbee.ClusterName(cluster))
+	}
+	return cluster, attrs, nil
+}
+
+// runRead asks a device for some attributes through an open coordinator.
+func runRead(ctx context.Context, g *globals, coordinator *zigbee.Coordinator, name string, target zigbee.Target, attrs []uint16, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	if !g.json {
-		fmt.Printf("%s %s\n", describeTarget(name, target), zigbee.ClusterName(cluster))
-		noteWait(*timeout)
+		fmt.Printf("%s %s\n", describeTarget(name, target), zigbee.ClusterName(target.Cluster))
+		noteWait(timeout)
 	}
 
 	values, err := coordinator.ReadAttributes(ctx, target, attrs)
@@ -119,14 +152,21 @@ flags:
 	return nil
 }
 
-func cmdWrite(ctx context.Context, g *globals, args []string) error {
-	fs := flag.NewFlagSet("write", flag.ContinueOnError)
-	dbPath := fs.String("db", "", "device registry file (default: "+store.DefaultPath()+")")
-	endpoint := fs.Int("endpoint", 0, "endpoint to address (default: whichever one has the cluster)")
-	timeout := fs.Duration("timeout", defaultRequestTimeout, "how long to wait for the reply")
-	typeName := fs.String("type", "", "wire encoding of the value, when gzb does not know the attribute")
-	fs.Usage = func() {
-		fmt.Fprint(os.Stderr, `usage: gzb write [flags] <device> <cluster> <attribute> <value> [attribute value...]
+// writeFlags are the flags `write` takes.
+type writeFlags struct {
+	targetFlags
+	typeName *string
+}
+
+func addWriteFlags(fs *flag.FlagSet) writeFlags {
+	return writeFlags{
+		targetFlags: addTargetFlags(fs, defaultRequestTimeout),
+		typeName:    fs.String("type", "", "wire encoding of the value, when gzb does not know the attribute"),
+	}
+}
+
+func writeUsage(fs *flag.FlagSet) {
+	fmt.Fprint(fs.Output(), `usage: gzb write [flags] <device> <cluster> <attribute> <value> [attribute value...]
 
 Sets attributes on a device. Several may be written at once, as
 attribute/value pairs, which for a battery device matters: they go out in one
@@ -149,8 +189,14 @@ attribute with "read only", which is reported here as such.
 
 flags:
 `)
-		fs.PrintDefaults()
-	}
+	fs.PrintDefaults()
+}
+
+func cmdWrite(ctx context.Context, g *globals, args []string) error {
+	fs := flag.NewFlagSet("write", flag.ContinueOnError)
+	dbPath := fs.String("db", "", "device registry file (default: "+store.DefaultPath()+")")
+	f := addWriteFlags(fs)
+	fs.Usage = func() { writeUsage(fs) }
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -159,16 +205,15 @@ flags:
 		return flag.ErrHelp
 	}
 
-	cluster, ok := zigbee.ParseCluster(fs.Arg(1))
-	if !ok {
-		return unknownCluster(fs.Arg(1))
-	}
-	writes, err := parseWrites(cluster, fs.Args()[2:], *typeName)
+	cluster, writes, err := parseWriteArgs(fs.Args()[1:], *f.typeName)
 	if err != nil {
 		return err
 	}
-
-	target, name, err := resolveTarget(*dbPath, fs.Arg(0), cluster, *endpoint)
+	devices, err := zigbee.LoadDevices(*dbPath)
+	if err != nil {
+		return err
+	}
+	target, name, err := resolveTarget(devices, fs.Arg(0), cluster, *f.endpoint)
 	if err != nil {
 		return err
 	}
@@ -179,15 +224,33 @@ flags:
 	}
 	defer coordinator.Close()
 
-	ctx, cancel := context.WithTimeout(ctx, *timeout)
+	return runWrite(ctx, g, coordinator, name, target, writes, *f.timeout)
+}
+
+// parseWriteArgs reads a cluster and the attribute/value pairs to write on it.
+func parseWriteArgs(args []string, typeName string) (uint16, []zigbee.AttributeWrite, error) {
+	cluster, ok := zigbee.ParseCluster(args[0])
+	if !ok {
+		return 0, nil, unknownCluster(args[0])
+	}
+	writes, err := parseWrites(cluster, args[1:], typeName)
+	if err != nil {
+		return 0, nil, err
+	}
+	return cluster, writes, nil
+}
+
+// runWrite sets attributes on a device through an open coordinator.
+func runWrite(ctx context.Context, g *globals, coordinator *zigbee.Coordinator, name string, target zigbee.Target, writes []zigbee.AttributeWrite, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	if !g.json {
-		fmt.Printf("%s %s\n", describeTarget(name, target), zigbee.ClusterName(cluster))
+		fmt.Printf("%s %s\n", describeTarget(name, target), zigbee.ClusterName(target.Cluster))
 		for _, write := range writes {
-			fmt.Printf("  %-24s = %v (%s)\n", zigbee.AttributeName(cluster, write.ID), write.Value, write.Type)
+			fmt.Printf("  %-24s = %v (%s)\n", zigbee.AttributeName(target.Cluster, write.ID), write.Value, write.Type)
 		}
-		noteWait(*timeout)
+		noteWait(timeout)
 	}
 
 	results, err := coordinator.WriteAttributes(ctx, target, writes)
@@ -201,20 +264,33 @@ flags:
 	return nil
 }
 
-func cmdReporting(ctx context.Context, g *globals, args []string) error {
-	fs := flag.NewFlagSet("reporting", flag.ContinueOnError)
-	dbPath := fs.String("db", "", "device registry file (default: "+store.DefaultPath()+")")
-	endpoint := fs.Int("endpoint", 0, "endpoint to address (default: whichever one has the cluster)")
-	timeout := fs.Duration("timeout", defaultRequestTimeout, "how long to wait for the reply")
-	typeName := fs.String("type", "", "wire encoding of the attribute, when gzb does not know it")
-	min := fs.Duration("min", time.Minute, "shortest interval between reports")
-	max := fs.Duration("max", time.Hour, "longest interval between reports, the heartbeat")
-	change := fs.Int64("change", 0, "how far the value must move to be worth reporting, in the attribute's own units")
-	off := fs.Bool("off", false, "stop the device reporting these attributes")
-	defaults := fs.Bool("default", false, "revert these attributes to the device's own default reporting")
-	show := fs.Bool("show", false, "report what the device currently has configured, and change nothing")
-	fs.Usage = func() {
-		fmt.Fprint(os.Stderr, `usage: gzb reporting [flags] <device> <cluster> <attribute...>
+// reportingFlags are the flags `reporting` takes.
+type reportingFlags struct {
+	targetFlags
+	typeName *string
+	min      *time.Duration
+	max      *time.Duration
+	change   *int64
+	off      *bool
+	defaults *bool
+	show     *bool
+}
+
+func addReportingFlags(fs *flag.FlagSet) reportingFlags {
+	return reportingFlags{
+		targetFlags: addTargetFlags(fs, defaultRequestTimeout),
+		typeName:    fs.String("type", "", "wire encoding of the attribute, when gzb does not know it"),
+		min:         fs.Duration("min", time.Minute, "shortest interval between reports"),
+		max:         fs.Duration("max", time.Hour, "longest interval between reports, the heartbeat"),
+		change:      fs.Int64("change", 0, "how far the value must move to be worth reporting, in the attribute's own units"),
+		off:         fs.Bool("off", false, "stop the device reporting these attributes"),
+		defaults:    fs.Bool("default", false, "revert these attributes to the device's own default reporting"),
+		show:        fs.Bool("show", false, "report what the device currently has configured, and change nothing"),
+	}
+}
+
+func reportingUsage(fs *flag.FlagSet) {
+	fmt.Fprint(fs.Output(), `usage: gzb reporting [flags] <device> <cluster> <attribute...>
 
 Asks a device to report attributes on its own initiative, so that gzb learns of
 a change without having to ask. The configuration lives in the device, not
@@ -248,8 +324,14 @@ every second will get you one, until the battery is flat.
 
 flags:
 `)
-		fs.PrintDefaults()
-	}
+	fs.PrintDefaults()
+}
+
+func cmdReporting(ctx context.Context, g *globals, args []string) error {
+	fs := flag.NewFlagSet("reporting", flag.ContinueOnError)
+	dbPath := fs.String("db", "", "device registry file (default: "+store.DefaultPath()+")")
+	f := addReportingFlags(fs)
+	fs.Usage = func() { reportingUsage(fs) }
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -258,41 +340,15 @@ flags:
 		return flag.ErrHelp
 	}
 
-	cluster, ok := zigbee.ParseCluster(fs.Arg(1))
-	if !ok {
-		return unknownCluster(fs.Arg(1))
-	}
-	attrs, err := parseAttributes(cluster, fs.Args()[2:])
+	cluster, attrs, configs, err := f.parseArgs(fs.Args()[1:])
 	if err != nil {
 		return err
 	}
-
-	if *change < 0 {
-		return fmt.Errorf("a reportable change is a distance, so it cannot be negative")
+	devices, err := zigbee.LoadDevices(*dbPath)
+	if err != nil {
+		return err
 	}
-	if *show && (*off || *defaults) {
-		return fmt.Errorf("-show only asks what the device holds; it cannot be combined with a change")
-	}
-	if *off && *defaults {
-		return fmt.Errorf("-off and -default ask for different things: never report, versus report as the device sees fit")
-	}
-	configs := make([]zigbee.ReportConfig, 0, len(attrs))
-	for _, attr := range attrs {
-		dataType, err := attributeType(cluster, attr, *typeName)
-		if err != nil {
-			return err
-		}
-		config := zigbee.ReportConfig{ID: attr, Type: dataType, Min: *min, Max: *max, Change: uint64(*change)}
-		switch {
-		case *defaults:
-			config = zigbee.ReportDefaults(attr, dataType)
-		case *off:
-			config.Max = zigbee.ReportingOff
-		}
-		configs = append(configs, config)
-	}
-
-	target, name, err := resolveTarget(*dbPath, fs.Arg(0), cluster, *endpoint)
+	target, name, err := resolveTarget(devices, fs.Arg(0), cluster, *f.endpoint)
 	if err != nil {
 		return err
 	}
@@ -303,13 +359,59 @@ flags:
 	}
 	defer coordinator.Close()
 
-	ctx, cancel := context.WithTimeout(ctx, *timeout)
+	return runReporting(ctx, g, coordinator, name, target, attrs, configs, *f.show, *f.timeout)
+}
+
+// parseArgs reads the cluster and attributes a reporting command names, and
+// builds the configuration the flags ask for on each. It checks the flags
+// against each other first: a wrong combination is a mistake to report
+// before anything else is looked at.
+func (f reportingFlags) parseArgs(args []string) (cluster uint16, attrs []uint16, configs []zigbee.ReportConfig, err error) {
+	cluster, ok := zigbee.ParseCluster(args[0])
+	if !ok {
+		return 0, nil, nil, unknownCluster(args[0])
+	}
+	attrs, err = parseAttributes(cluster, args[1:])
+	if err != nil {
+		return 0, nil, nil, err
+	}
+
+	switch {
+	case *f.change < 0:
+		return 0, nil, nil, fmt.Errorf("a reportable change is a distance, so it cannot be negative")
+	case *f.show && (*f.off || *f.defaults):
+		return 0, nil, nil, fmt.Errorf("-show only asks what the device holds; it cannot be combined with a change")
+	case *f.off && *f.defaults:
+		return 0, nil, nil, fmt.Errorf("-off and -default ask for different things: never report, versus report as the device sees fit")
+	}
+	configs = make([]zigbee.ReportConfig, 0, len(attrs))
+	for _, attr := range attrs {
+		dataType, err := attributeType(cluster, attr, *f.typeName)
+		if err != nil {
+			return 0, nil, nil, err
+		}
+		config := zigbee.ReportConfig{ID: attr, Type: dataType, Min: *f.min, Max: *f.max, Change: uint64(*f.change)}
+		switch {
+		case *f.defaults:
+			config = zigbee.ReportDefaults(attr, dataType)
+		case *f.off:
+			config.Max = zigbee.ReportingOff
+		}
+		configs = append(configs, config)
+	}
+	return cluster, attrs, configs, nil
+}
+
+// runReporting asks a device what it reports, or changes it, through an open
+// coordinator.
+func runReporting(ctx context.Context, g *globals, coordinator *zigbee.Coordinator, name string, target zigbee.Target, attrs []uint16, configs []zigbee.ReportConfig, show bool, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	if *show {
+	if show {
 		if !g.json {
-			fmt.Printf("%s %s\n", describeTarget(name, target), zigbee.ClusterName(cluster))
-			noteWait(*timeout)
+			fmt.Printf("%s %s\n", describeTarget(name, target), zigbee.ClusterName(target.Cluster))
+			noteWait(timeout)
 		}
 		holding, err := coordinator.ReportingConfiguration(ctx, target, attrs)
 		if err != nil {
@@ -323,11 +425,11 @@ flags:
 	}
 
 	if !g.json {
-		fmt.Printf("%s %s\n", describeTarget(name, target), zigbee.ClusterName(cluster))
+		fmt.Printf("%s %s\n", describeTarget(name, target), zigbee.ClusterName(target.Cluster))
 		for _, config := range configs {
-			fmt.Printf("  %-24s %s\n", zigbee.AttributeName(cluster, config.ID), describeReporting(cluster, config))
+			fmt.Printf("  %-24s %s\n", zigbee.AttributeName(target.Cluster, config.ID), describeReporting(target.Cluster, config))
 		}
-		noteWait(*timeout)
+		noteWait(timeout)
 	}
 
 	results, err := coordinator.ConfigureReporting(ctx, target, configs)
@@ -356,53 +458,6 @@ func printReportingStatus(holding []zigbee.ReportingStatus) {
 			fmt.Printf("  %-24s not reported\n", status.Name)
 		}
 	}
-}
-
-// resolveTarget turns a device argument and a cluster into an address.
-//
-// This reads the registry but never writes it: the coordinator keeps its own
-// copy and saves what it learns, so a second writer here would overwrite it.
-func resolveTarget(dbPath, deviceArg string, cluster uint16, endpoint int) (zigbee.Target, string, error) {
-	if endpoint != 0 && (endpoint < firstAppEndpoint || endpoint > lastAppEndpoint) {
-		return zigbee.Target{}, "", fmt.Errorf("endpoint %d is outside the application range %d-%d (0 is ZDO)", endpoint, firstAppEndpoint, lastAppEndpoint)
-	}
-
-	db, err := store.Open(dbPath)
-	if err != nil {
-		return zigbee.Target{}, "", err
-	}
-
-	// Endpoint 1 is where a device with only one puts everything, and is the
-	// right guess for a device the registry has never interviewed.
-	target := zigbee.Target{Cluster: cluster, Endpoint: firstAppEndpoint}
-	name := deviceArg
-
-	device, err := db.Resolve(deviceArg)
-	switch {
-	case err == nil:
-		target.Node = device.NodeID
-		name = device.Describe()
-		if ep, ok := device.HasCluster(cluster); ok {
-			target.Endpoint = ep
-		}
-	case errors.Is(err, store.ErrNoDevice):
-		// A bare hex address addresses a device the registry may not know,
-		// which is how something that joined unobserved gets talked to.
-		node, ok := store.ParseNodeID(deviceArg)
-		if !ok {
-			return zigbee.Target{}, "", resolveError(err)
-		}
-		target.Node = node
-	default:
-		// An ambiguous name is a question for the user, not something to
-		// guess past.
-		return zigbee.Target{}, "", err
-	}
-
-	if endpoint != 0 {
-		target.Endpoint = uint8(endpoint)
-	}
-	return target, name, nil
 }
 
 // parseAttributes resolves the attribute arguments, falling back to everything

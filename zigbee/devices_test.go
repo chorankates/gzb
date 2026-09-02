@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -51,6 +52,48 @@ func TestDevicesSnapshotsTheRegistry(t *testing.T) {
 	got.Latest["temperature"] = LatestReading{Value: -100}
 	if db.Devices[thermo.IEEE].Readings["temperature"].Value != 23.9 {
 		t.Error("mutating a snapshot reached the registry")
+	}
+}
+
+// The registry can be read without the port, for anything that wants the
+// device list and must not touch the adapter to get it — and what comes back
+// is the same shape Devices gives, endpoints included.
+func TestLoadDevicesReadsTheRegistryWithoutThePort(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "devices.json")
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lamp, _ := db.Observe("00:11:22:33:44:55:66:77", 0x1234, time.Now())
+	lamp.Name = "bedroom lamp"
+	lamp.Interviewed = time.Now()
+	lamp.Endpoints = []store.Endpoint{
+		{ID: 1, Profile: 0x0104, Input: []uint16{zcl.ClusterBasic}},
+		{ID: 2, Profile: 0x0104, Input: []uint16{zcl.ClusterOnOff, zcl.ClusterLevelControl}},
+	}
+	if err := db.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	devices, err := LoadDevices(path)
+	if err != nil {
+		t.Fatalf("LoadDevices: %v", err)
+	}
+	if len(devices) != 1 || devices[0].Name != "bedroom lamp" {
+		t.Fatalf("LoadDevices = %+v", devices)
+	}
+	if ep, ok := devices[0].Endpoint(ClusterOnOff); !ok || ep != 2 {
+		t.Errorf("Endpoint(on/off) = %d, %v; want endpoint 2", ep, ok)
+	}
+	if _, ok := devices[0].Endpoint(0x0402); ok {
+		t.Error("Endpoint(temperature) found one on a lamp")
+	}
+
+	// A registry that does not exist yet is empty, not an error: the first
+	// command anyone runs is before any device has joined.
+	devices, err = LoadDevices(filepath.Join(t.TempDir(), "missing.json"))
+	if err != nil || len(devices) != 0 {
+		t.Errorf("LoadDevices of a missing file = %v, %v", devices, err)
 	}
 }
 
