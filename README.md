@@ -818,6 +818,69 @@ for a startup hue — colour is held in device NVM and restored, in practice, bu
 the specification does not promise it, so the honest thing is to verify a
 colour survives a real off/on cycle rather than to assume it.
 
+### A light that belongs to a sensor
+
+light1 and light2 are night lights with a motion sensor on board. They sit
+dark, and their own sensor switches them on; gzb is not in that loop, and
+there is no command that puts it there. Which makes one phrase a mistake:
+
+```console
+gzb> light 1 on
+```
+
+It works, and that is the problem. The lamp is now lit until something says
+`off`, and gzb has taken it from the sensor rather than configured it. What
+the phrase should have been is two lines, both of which leave the light dark:
+
+```console
+gzb> light 1 off
+gzb> light -persist 1 red dim
+light1 (0xA489) endpoint 1
+  hue 0°, saturation 100%
+  level 63 (25%)
+  on level 63 — what it returns to when something else switches it on
+  ok
+```
+
+The first puts the light back where it rests, which is where the sensor picks
+it up. The second says what the sensor should switch it on to. Three things
+about that line:
+
+- **Leave `on` out.** Of the whole vocabulary only `on`, `off` and `toggle`
+  touch the switch. A colour, a white point, a brightness and a step are all
+  the plain form of their command — Move to Level, not Move to Level (with
+  On/Off); Step, not Step (with On/Off) — and leave the switch alone, which is
+  what lets the light be configured in daylight and stay dark.
+- **Flags go before the device**, at the prompt as on the command line:
+  `light -persist 1 red dim`, not `light 1 -persist red dim`.
+- **`-persist` needs an absolute brightness.** `dim` and `25%` are levels the
+  lamp can be told to return to. `dimmer` is a step from wherever it happens
+  to be, and there is nothing fixed to write:
+
+  ```console
+  gzb> light -persist 1 dimmer
+  gzb: --persist needs an absolute brightness to persist, not just a step (say `dim` or `25%`, not `dimmer`)
+  ```
+
+Whether it worked is not something gzb can show at the time, because the
+interesting moment is one it does not cause. Wait for the sensor to trip the
+light once, then ask the lamp what it did. The level should be the persisted
+one, and the colour — which nothing in the specification promises — should
+have survived:
+
+```console
+gzb> read 1 level level "on level"
+light1 (0xA489) endpoint 1, level
+  waiting up to 5m0s; a battery device only listens while polling its parent
+  level                    63 (uint8)
+  on level                 63 (uint8)
+gzb> read 1 color hue saturation
+light1 (0xA489) endpoint 1, color
+  waiting up to 5m0s; a battery device only listens while polling its parent
+  hue                      0 (uint8)
+  saturation               254 (uint8)
+```
+
 ## A prompt, for the Tab key
 
 Every command above opens the adapter, resets it, waits for the network to come
@@ -870,6 +933,11 @@ among the lights. The command line resolves the same way, so `gzb light 1 off`
 works there too. Nothing that resolved before stops resolving: the whole
 registry is still tried when the scope has no match, and an ambiguity is still
 an error naming the candidates rather than a guess.
+
+Flags go before the device at the prompt as well, so an option never has to be
+told apart from a light word: `light -persist 1 red dim` is [the phrase for a
+light a sensor owns](#a-light-that-belongs-to-a-sensor), and `help light`
+prints the same usage as `gzb light -h`.
 
 `join` is at the prompt too, and it is where a session earns its keep. The
 best moment to interview a battery device is [immediately after it
@@ -1036,7 +1104,11 @@ $ make recapture-light LIGHT=light1 CONFIGURE=--configure
 
 Nothing it runs turns a light on — every command it sends sets a colour or a
 level, both of which leave the on/off state alone — so it is safe against a
-light that is meant to stay dark. The state it records and puts back is a
+light that is meant to stay dark. The read-only run also asks for the level,
+the `OnLevel` it will come back at and whether it is lit, which is what backs
+[the sensor-owned light](#a-light-that-belongs-to-a-sensor) being configured
+dark, and it captures `-persist dimmer` being refused — a `light` command, but
+one that sends nothing. The state it records and puts back is a
 colour, a brightness and an `OnLevel` rather than a reporting configuration,
 and it restores them with the exact forms (`hue:0/254`, `level:63`) for the
 reason those exist: a restore that rounds a hue to the nearest named colour has

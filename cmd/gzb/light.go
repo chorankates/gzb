@@ -47,6 +47,7 @@ carried out in the order given.
   gzb light light1 brighter
   gzb light "hallway lamp" on warm 40%%
   gzb light light1 off
+  gzb light -persist light1 red dim
 
 The vocabulary is a pattern rather than a list: a plain word is a place to go
 to, and its comparative is a distance to move. "dim" puts a light at a quarter
@@ -69,10 +70,20 @@ How a colour is sent depends on what the lamp says it can be told, not on what
 model it is: hue and saturation where it supports them, CIE xy where it does
 not, and a colour temperature where that is all it has.
 
---persist matters for a light something else switches on — a motion sensor, a
-wall switch. Setting a brightness changes what the lamp is doing now; --persist
-also writes the level it will come back at, which is the one that survives
-being turned off and on again by something that is not gzb.
+Only "on", "off" and "toggle" touch the switch. Every other word — a colour, a
+white point, a brightness, a step — leaves it alone, so a light that is off
+stays off while being told what to look like.
+
+That is how a light something else switches on — a motion sensor, a wall
+switch — is set up: not by saying "on", which takes it out of the sensor's
+hands until something says "off", but by saying what it should be while it is
+dark. Setting a brightness changes what the lamp is doing now; --persist also
+writes the level it will come back at, which is the one that survives being
+turned off and on again by something that is not gzb. It needs an absolute
+brightness such as "dim" or "25%%": a step has nothing fixed to write.
+
+  gzb light light1 off                  dark is its resting state
+  gzb light -persist light1 red dim     what the sensor switches it on to
 
 flags:
 `, strings.Join(zigbee.ColorNames(), ", "), strings.Join(zigbee.WhitePointNames(), ", "))
@@ -120,6 +131,18 @@ func runLight(ctx context.Context, g *globals, coordinator *zigbee.Coordinator, 
 	ctx, cancel := context.WithTimeout(ctx, *f.timeout)
 	defer cancel()
 
+	// A phrase --persist cannot honour is refused before any of it is sent:
+	// stepping the lamp and then declining to persist would leave it changed
+	// by a command that reported failure.
+	var onLevel uint8
+	if *f.persist {
+		level, ok := lastAbsoluteLevel(actions)
+		if !ok {
+			return fmt.Errorf("--persist needs an absolute brightness to persist, not just a step (say `dim` or `25%%`, not `dimmer`)")
+		}
+		onLevel = level
+	}
+
 	if !g.json {
 		printLightPlan(name, light, actions)
 	}
@@ -128,15 +151,11 @@ func runLight(ctx context.Context, g *globals, coordinator *zigbee.Coordinator, 
 		return err
 	}
 	if *f.persist {
-		level, ok := lastAbsoluteLevel(actions)
-		if !ok {
-			return fmt.Errorf("--persist needs an absolute brightness to persist, not just a step (say `dim` or `25%%`, not `dimmer`)")
-		}
-		if err := coordinator.SetOnLevel(ctx, light, level); err != nil {
+		if err := coordinator.SetOnLevel(ctx, light, onLevel); err != nil {
 			return err
 		}
 		if !g.json {
-			printOnLevel(level)
+			printOnLevel(onLevel)
 		}
 	}
 

@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"flag"
+	"strings"
 	"testing"
 
 	"github.com/chorankates/gzb/zigbee"
@@ -102,5 +105,30 @@ func TestRenderOnLevel(t *testing.T) {
 		"  ok\n"
 	if got != want {
 		t.Errorf("on level rendered as\n%s\nwant\n%s", got, want)
+	}
+}
+
+// A --persist phrase with no level to persist is refused before anything is
+// sent — the coordinator here is nil, so reaching it would panic — and before
+// the plan is echoed, so the README's transcript of the refusal is one line.
+func TestPersistRefusesBeforeSending(t *testing.T) {
+	fs := flag.NewFlagSet("light", flag.ContinueOnError)
+	f := addLightFlags(fs)
+	if err := fs.Parse([]string{"-persist"}); err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	actions, err := zigbee.ParseActions([]string{"red", "dimmer"})
+	if err != nil {
+		t.Fatalf("ParseActions: %v", err)
+	}
+	var runErr error
+	got := capture(t, func() {
+		runErr = runLight(context.Background(), &globals{}, nil, "light1", zigbee.Light{Node: 0xA489, Endpoint: 1}, actions, f)
+	})
+	if runErr == nil || !strings.Contains(runErr.Error(), "absolute brightness") {
+		t.Fatalf("err = %v, want a refusal to persist a step", runErr)
+	}
+	if got != "" {
+		t.Errorf("a refused phrase still printed a plan:\n%s", got)
 	}
 }

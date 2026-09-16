@@ -94,6 +94,16 @@ capture "a colour is not a writable attribute" write "$LIGHT" color hue 0
 capture "what the light can be told" read "$LIGHT" color 0x400A
 capture "colour and brightness now" read "$LIGHT" color 0x0000 0x0001
 
+# The level it is at and the level it comes back at are two attributes, and
+# for a light a sensor switches on the second is the one that matters. Reading
+# whether it is lit alongside them is what shows it was configured dark.
+capture "the level now, and the level it comes back at" read "$LIGHT" level 0x0000 0x0011
+capture "whether it is lit" read "$LIGHT" on/off 0x0000
+
+# A phrase --persist cannot honour is refused before anything is sent, so the
+# refusal is a read-only capture even though the command is `light`.
+capture "a step is not a level to persist" light -persist "$LIGHT" dimmer
+
 if [ "$MODE" != "--configure" ]; then
 	emit "### the commands that change it: skipped"
 	emit "Pass --configure to capture them. Those write to the device."
