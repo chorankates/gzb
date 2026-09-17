@@ -85,6 +85,8 @@ type Reading struct {
 // interface also keeps the report loop testable without serial hardware.
 type connection interface {
 	NetworkState(context.Context) (ezsp.NetworkStatus, error)
+	NetworkParameters(context.Context) (ezsp.NodeType, ezsp.NetworkParameters, error)
+	NodeID(context.Context) (uint16, error)
 	Subscribe(func(ezsp.Message) bool, int) (<-chan ezsp.Message, func())
 	WatchJoins(int) (<-chan ezsp.JoinEvent, <-chan error, func())
 	SendUnicast(context.Context, uint16, ezsp.APSFrame, uint8, []byte) (uint8, error)
@@ -143,6 +145,52 @@ func Open(ctx context.Context, opts Options) (*Coordinator, error) {
 		return nil, err
 	}
 	return &Coordinator{conn: conn, db: db, opts: opts}, nil
+}
+
+// Network describes the seat this adapter holds on its network.
+type Network struct {
+	// Role is the adapter's part in the network: "coordinator" when it runs
+	// the network, "router" when it joined one that another adapter runs.
+	Role string `json:"role"`
+	// Coordinator reports whether this adapter is the network's coordinator
+	// and trust centre, which is what pairing devices takes.
+	Coordinator bool   `json:"coordinator"`
+	NodeID      uint16 `json:"node_id"`
+	PanID       uint16 `json:"pan_id"`
+	// ExtendedPanID is the network's 64-bit identity, formatted as an address.
+	ExtendedPanID string `json:"extended_pan_id"`
+	Channel       uint8  `json:"channel"`
+}
+
+// Network reports which network the adapter is on and as what. It fails
+// when the adapter holds no network.
+func (c *Coordinator) Network(ctx context.Context) (Network, error) {
+	if err := c.checkOpen(); err != nil {
+		return Network{}, err
+	}
+	state, err := c.conn.NetworkState(ctx)
+	if err != nil {
+		return Network{}, fmt.Errorf("zigbee: reading network state: %w", err)
+	}
+	if !state.Joined() {
+		return Network{}, fmt.Errorf("zigbee: no network on this adapter (%s)", state)
+	}
+	nodeType, np, err := c.conn.NetworkParameters(ctx)
+	if err != nil {
+		return Network{}, fmt.Errorf("zigbee: reading network parameters: %w", err)
+	}
+	nodeID, err := c.conn.NodeID(ctx)
+	if err != nil {
+		return Network{}, fmt.Errorf("zigbee: reading node ID: %w", err)
+	}
+	return Network{
+		Role:          nodeType.String(),
+		Coordinator:   nodeType == ezsp.NodeCoordinator,
+		NodeID:        nodeID,
+		PanID:         np.PanID,
+		ExtendedPanID: np.ExtendedPanID.String(),
+		Channel:       np.RadioChannel,
+	}, nil
 }
 
 // PermitJoin opens the network to new devices for duration. A zero duration

@@ -107,6 +107,8 @@ commands:
   probe             inspect the adapter: firmware, network state, radio parameters
   network show      same as probe
   network form      create a new network (destructive, needs --confirm)
+  network scan      list the networks in range and whether each is open
+  network join      join an open network as a router: a second seat on it
   network leave     tear down the current network (destructive, needs --confirm)
   permit-join <s>   open the network to new devices for s seconds, then exit
   join [s]          open the network and watch devices arrive (default 60s)

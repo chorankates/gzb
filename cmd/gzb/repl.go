@@ -277,6 +277,16 @@ func (s *session) banner() {
 	}
 	fmt.Printf("gzb on %s: %d device(s) in the registry, %d interviewed.\n", s.g.port, len(devices), interviewed)
 	fmt.Println("Tab completes; `help` lists commands; Ctrl-D quits.")
+	// The seat matters when it is not the usual one. A router reaches every
+	// device the coordinator does, but pairing is the trust centre's job, and
+	// a person at this prompt should know which adapter that is.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if net, err := s.coordinator.Network(ctx); err != nil {
+		fmt.Println("No network on this adapter: `gzb network join` a coordinator's, or `gzb network form` one.")
+	} else if !net.Coordinator {
+		fmt.Printf("This adapter is a %s on PAN 0x%04X (channel %d), not its coordinator: it can ask\ndevices anything, but `join` pairs nothing here; pair from the coordinator.\n", net.Role, net.PanID, net.Channel)
+	}
 	if len(devices) > 0 && interviewed == 0 {
 		fmt.Println("Nothing has been interviewed yet, so Tab has little to offer; `interview --all` fixes that.")
 	}

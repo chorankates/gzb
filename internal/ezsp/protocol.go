@@ -29,7 +29,11 @@ const (
 	FrameStackStatusHandler    FrameID = 0x0019
 	FrameNetworkInit           FrameID = 0x0017
 	FrameNetworkState          FrameID = 0x0018
+	FrameStartScan             FrameID = 0x001A
+	FrameNetworkFoundHandler   FrameID = 0x001B
+	FrameScanCompleteHandler   FrameID = 0x001C
 	FrameFormNetwork           FrameID = 0x001E
+	FrameJoinNetwork           FrameID = 0x001F
 	FrameLeaveNetwork          FrameID = 0x0020
 	FramePermitJoining         FrameID = 0x0022
 	FrameGetEUI64              FrameID = 0x0026
@@ -54,8 +58,16 @@ func (f FrameID) String() string {
 		return "networkInit"
 	case FrameNetworkState:
 		return "networkState"
+	case FrameStartScan:
+		return "startScan"
+	case FrameNetworkFoundHandler:
+		return "networkFoundHandler"
+	case FrameScanCompleteHandler:
+		return "scanCompleteHandler"
 	case FrameFormNetwork:
 		return "formNetwork"
+	case FrameJoinNetwork:
+		return "joinNetwork"
 	case FrameLeaveNetwork:
 		return "leaveNetwork"
 	case FramePermitJoining:
@@ -88,6 +100,8 @@ func (f FrameID) String() string {
 		return "setInitialSecurityState"
 	case FrameGetCurrentSecurityState:
 		return "getCurrentSecurityState"
+	case FrameSetExtendedSecurityBitmask:
+		return "setExtendedSecurityBitmask"
 	default:
 		return fmt.Sprintf("frame 0x%04X", uint16(f))
 	}
@@ -189,6 +203,19 @@ const (
 	// 30-second window produced 0x9C immediately and 0x9D at expiry.
 	StatusNetworkOpened EmberStatus = 0x9C
 	StatusNetworkClosed EmberStatus = 0x9D
+
+	// The ways a join can end other than StatusNetworkUp, as stackStatusHandler
+	// reports them. Each names a different party at fault: no beacons is the
+	// radio, a failed join is the parent, a missing key is the trust centre.
+	StatusJoinFailed               EmberStatus = 0x94
+	StatusMoveFailed               EmberStatus = 0x96
+	StatusCannotJoinAsRouter       EmberStatus = 0x98
+	StatusSecurityStateNotSet      EmberStatus = 0xA8
+	StatusNoBeacons                EmberStatus = 0xAB
+	StatusReceivedKeyInTheClear    EmberStatus = 0xAC
+	StatusNoNetworkKeyReceived     EmberStatus = 0xAD
+	StatusNoLinkKeyReceived        EmberStatus = 0xAE
+	StatusPreconfiguredKeyRequired EmberStatus = 0xAF
 )
 
 func (s EmberStatus) String() string {
@@ -209,6 +236,24 @@ func (s EmberStatus) String() string {
 		return "network closed to joining"
 	case StatusInvalidParameter:
 		return "invalid parameter"
+	case StatusJoinFailed:
+		return "join failed (the parent did not accept the association)"
+	case StatusMoveFailed:
+		return "move failed"
+	case StatusCannotJoinAsRouter:
+		return "cannot join as a router"
+	case StatusSecurityStateNotSet:
+		return "security state not set"
+	case StatusNoBeacons:
+		return "no beacons heard"
+	case StatusReceivedKeyInTheClear:
+		return "network key arrived unencrypted"
+	case StatusNoNetworkKeyReceived:
+		return "no network key received from the trust centre"
+	case StatusNoLinkKeyReceived:
+		return "no link key received from the trust centre"
+	case StatusPreconfiguredKeyRequired:
+		return "a preconfigured key is required"
 	default:
 		return fmt.Sprintf("status 0x%02X", uint8(s))
 	}

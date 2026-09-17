@@ -139,6 +139,55 @@ That restore step is required. Resetting the ASH link resets the NCP, which
 comes back with its radio idle even when credentials are stored — so without
 `networkInit`, a perfectly good network looks like no network at all.
 
+### A second seat on the network
+
+The process holding the serial port holds it exclusively, which is fine until
+the process that should hold it is an application — a bridge that pairs
+devices and serves readings over HTTP — and the person who wants a prompt is
+somebody else. Stopping the bridge to run `gzb repl` is the interruption
+`network join` removes: a second adapter joins the same network as a
+**router**, and `gzb` on that adapter reaches every device directly while the
+first carries on coordinating.
+
+```console
+$ gzb join 60                                   # on the coordinator: open the network
+$ gzb --port /dev/ttyUSB1 network join          # on the spare adapter
+Scanning channels 11-26...
+Joining the network on channel 15, PAN ID 0x6F88, as a router...
+
+Joined.
+
+  Role         router
+  Node ID      0x1A2B
+  ...
+$ gzb --port /dev/ttyUSB1 repl
+```
+
+A join is an active scan followed by `joinNetwork`. The scan is what makes it
+usable: every router in range answers a beacon request with the network's
+identity and whether it is currently accepting joins, so "nothing to join"
+comes apart into its three different causes — no network in range, a network
+that is closed, more than one that is open — each with its own message, and
+`network scan` on its own shows the same table without joining anything.
+
+The security state is the mirror image of the coordinator's. A joiner holds
+only the well-known `ZigBeeAlliance09` link key and insists the network key
+arrives encrypted under it; the trust centre supplies the network key during
+the join and, asked for one, a link key of the joiner's own afterwards, which
+is the request gzb's own trust centre answers by generating one. Whatever
+happens is reported through `stackStatusHandler` and named — `no beacons
+heard`, `join failed`, `no network key received from the trust centre` — so
+a join that fails says which party refused rather than timing out.
+
+The credentials are stored in the adapter's tokens, so the same `networkInit`
+that restores a coordinator restores a router: the spare adapter is on the
+network every time it is opened, until `network leave`. A router is a router,
+though, not a second coordinator. Unicasts — `read`, `write`, `light`,
+`interview` — work from it because they go straight to the device. Reports a
+device sends on its own go where the device is bound, which is the
+coordinator; and pairing is the trust centre's job, so `join` at the router's
+prompt opens nothing useful. The prompt says so on its banner.
+
 ## Usage
 
 ```console
@@ -162,6 +211,8 @@ Network
 ```console
 $ gzb network form --channel 15          # dry run; prints what it would do
 $ gzb network form --channel 15 --confirm
+$ gzb network scan                       # what is in range, and whether it is open
+$ gzb network join                       # join the open network as a router
 $ gzb network leave --confirm
 $ gzb permit-join 60                     # open to new devices, then exit
 $ gzb permit-join 0                      # close again
@@ -1122,6 +1173,8 @@ Working and verified against hardware, with a real device paired:
 - EZSP version negotiation and both frame layouts
 - NCP configuration and endpoint registration, re-applied every session
 - Network formation and persistence across reconnects
+- Active scanning, and joining an existing network as a router, so a second
+  adapter is a second seat on the same network
 - Trust-centre join policy, applied and verified by read-back
 - Pairing: all three join callbacks decoded, merged and recorded
 - ZCL attribute reports decoded into readings, and the device registry

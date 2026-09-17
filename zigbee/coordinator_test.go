@@ -58,6 +58,17 @@ func (f *fakeConnection) NetworkState(context.Context) (ezsp.NetworkStatus, erro
 	return f.state, nil
 }
 
+func (f *fakeConnection) NetworkParameters(context.Context) (ezsp.NodeType, ezsp.NetworkParameters, error) {
+	if !f.state.Joined() {
+		return 0, ezsp.NetworkParameters{}, errors.New("fake: not joined")
+	}
+	return ezsp.NodeCoordinator, ezsp.NetworkParameters{PanID: 0x6F88, RadioChannel: 15}, nil
+}
+
+func (f *fakeConnection) NodeID(context.Context) (uint16, error) {
+	return 0x0000, nil
+}
+
 func (f *fakeConnection) Subscribe(func(ezsp.Message) bool, int) (<-chan ezsp.Message, func()) {
 	return f.msgs, func() {}
 }
