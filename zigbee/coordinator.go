@@ -93,6 +93,7 @@ type connection interface {
 	Request(context.Context, uint16, ezsp.APSFrame, []byte, func(ezsp.IncomingMessage) bool) (ezsp.IncomingMessage, error)
 	AllowJoins(context.Context) error
 	PermitJoining(context.Context, uint8) error
+	BroadcastPermitJoining(context.Context, uint8, uint8) error
 	Close() error
 }
 
@@ -107,6 +108,7 @@ type Coordinator struct {
 	closed         bool
 	readingsActive bool
 	readingsDone   chan struct{}
+	permitTSN      uint8
 
 	// dbMu guards the device registry. The readings loop, join recording,
 	// discovery and the registry API all touch it, and an application runs
@@ -197,6 +199,12 @@ func (c *Coordinator) Network(ctx context.Context) (Network, error) {
 // closes it. EZSP represents the duration as whole seconds in one byte, so
 // values must be between zero and 255 seconds. The protocol reserves 255
 // seconds to mean open indefinitely.
+//
+// The window is opened on every router, not only the coordinator. permitJoining
+// is local to the adapter, and a device that can hear a router but not the
+// coordinator only ever sees that router's beacons: with the routers closed it
+// scans, finds nothing accepting joins, and gives up without a trace. The
+// Mgmt_Permit_Joining broadcast that follows is what tells the routers.
 func (c *Coordinator) PermitJoin(ctx context.Context, duration time.Duration) error {
 	if duration < 0 || duration > 255*time.Second || duration%time.Second != 0 {
 		return fmt.Errorf("zigbee: permit-join duration must be a whole number of seconds from 0s through 255s")
@@ -223,6 +231,13 @@ func (c *Coordinator) PermitJoin(ctx context.Context, duration time.Duration) er
 	}
 	if err := c.conn.PermitJoining(ctx, seconds); err != nil {
 		return fmt.Errorf("zigbee: permitting joins: %w", err)
+	}
+	c.mu.Lock()
+	c.permitTSN++
+	tsn := c.permitTSN
+	c.mu.Unlock()
+	if err := c.conn.BroadcastPermitJoining(ctx, tsn, seconds); err != nil {
+		return fmt.Errorf("zigbee: asking routers to permit joins: %w", err)
 	}
 	return nil
 }

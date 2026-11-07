@@ -28,13 +28,14 @@ type fakeConnection struct {
 	// like from here.
 	responder func(dest uint16, aps ezsp.APSFrame, payload []byte) (ezsp.IncomingMessage, bool)
 
-	mu             sync.Mutex
-	allowJoins     int
-	permitCalls    int
-	permitDuration uint8
-	sent           int
-	requests       []sentRequest
-	closeOnce      sync.Once
+	mu                sync.Mutex
+	allowJoins        int
+	permitCalls       int
+	permitDuration    uint8
+	broadcastDuration *uint8
+	sent              int
+	requests          []sentRequest
+	closeOnce         sync.Once
 }
 
 // sentRequest records what was asked, so a test can check the question as well
@@ -117,6 +118,13 @@ func (f *fakeConnection) PermitJoining(_ context.Context, duration uint8) error 
 	return nil
 }
 
+func (f *fakeConnection) BroadcastPermitJoining(_ context.Context, _ uint8, duration uint8) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.broadcastDuration = &duration
+	return nil
+}
+
 func (f *fakeConnection) Close() error {
 	f.closeOnce.Do(func() {
 		close(f.msgs)
@@ -140,6 +148,9 @@ func TestPermitJoinConfiguresPolicyAndWindow(t *testing.T) {
 	}
 	if fake.permitDuration != 60 {
 		t.Errorf("PermitJoining duration = %d, want 60", fake.permitDuration)
+	}
+	if fake.broadcastDuration == nil || *fake.broadcastDuration != 60 {
+		t.Errorf("routers were not asked to permit joining for 60s (got %v)", fake.broadcastDuration)
 	}
 }
 

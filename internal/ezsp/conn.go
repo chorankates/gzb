@@ -25,7 +25,22 @@ var (
 	ErrClosed = errors.New("ezsp: connection closed")
 	// ErrTimeout is returned when the NCP does not answer a command.
 	ErrTimeout = errors.New("ezsp: timed out waiting for NCP")
+	// ErrUnsupported is returned when the NCP answers invalidCommand: the
+	// firmware does not implement the command, or not in this protocol
+	// version.
+	ErrUnsupported = errors.New("ezsp: command not supported by this NCP firmware")
 )
+
+// FrameInvalidCommand is what the NCP sends in place of a reply to a command
+// it does not recognise.
+const FrameInvalidCommand FrameID = 0x0058
+
+func invalidCommandReason(params []byte) string {
+	if len(params) == 0 {
+		return "no reason given"
+	}
+	return EzspStatus(params[0]).String()
+}
 
 // Tracer observes decoded EZSP traffic.
 type Tracer func(direction string, m Message)
@@ -40,6 +55,11 @@ type Options struct {
 	TraceEZSP Tracer
 	// TraceASH, when set, reports every ASH frame beneath it.
 	TraceASH ash.Tracer
+	// SkipNetworkRestore leaves the radio idle instead of calling
+	// networkInit. The stored credentials are untouched — the next ordinary
+	// Open brings the network straight back — but until then this adapter
+	// takes no part in it. Only the manufacturing-test receiver wants that.
+	SkipNetworkRestore bool
 }
 
 // Conn is a negotiated EZSP session with an NCP. It is safe for concurrent
@@ -142,6 +162,9 @@ func Open(ctx context.Context, opts Options) (*Conn, error) {
 	// idle even when credentials are saved in its tokens. Restoring them is
 	// what makes an existing network survive a reconnect; it creates nothing
 	// and changes nothing when no network is stored.
+	if opts.SkipNetworkRestore {
+		return c, nil
+	}
 	if err := c.restoreNetwork(ctx); err != nil {
 		c.Close()
 		return nil, err
@@ -356,6 +379,11 @@ func (c *Conn) command(ctx context.Context, id FrameID, params []byte) ([]byte, 
 	for {
 		select {
 		case msg := <-reply:
+			if !msg.Callback && msg.Sequence == seq && msg.ID == FrameInvalidCommand {
+				// The NCP does not implement this command at all. Without
+				// this check that reads as a five-second timeout.
+				return nil, fmt.Errorf("%w: %s (%s)", ErrUnsupported, id, invalidCommandReason(msg.Params))
+			}
 			if !matchesResponse(msg, seq, id) {
 				// A stale reply from an earlier command; keep waiting.
 				continue

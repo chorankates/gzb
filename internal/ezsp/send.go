@@ -164,3 +164,75 @@ func (c *Conn) SendUnicast(ctx context.Context, dest uint16, aps APSFrame, tag u
 	}
 	return seq, nil
 }
+
+// FrameSendBroadcast sends one APS message to a broadcast address.
+const FrameSendBroadcast FrameID = 0x0036
+
+// Broadcast addresses.
+const (
+	// BroadcastAll reaches every node, sleepy end devices included.
+	BroadcastAll uint16 = 0xFFFF
+	// BroadcastRxOnWhenIdle reaches every node that keeps its radio on.
+	BroadcastRxOnWhenIdle uint16 = 0xFFFD
+	// BroadcastRouters reaches the coordinator and every router.
+	BroadcastRouters uint16 = 0xFFFC
+)
+
+// SendBroadcast sends an application message to a broadcast address.
+//
+//	destination(2) apsFrame(11) radius(1) messageTag(1) messageLength(1) message
+//
+// A radius of zero lets the stack use its maximum.
+func (c *Conn) SendBroadcast(ctx context.Context, dest uint16, aps APSFrame, radius uint8, payload []byte) (uint8, error) {
+	if len(payload) > 255 {
+		return 0, fmt.Errorf("ezsp: payload of %d bytes exceeds the APS limit", len(payload))
+	}
+	var w wbuf
+	w.u16(dest)
+	w.u16(aps.Profile)
+	w.u16(aps.Cluster)
+	w.u8(aps.SourceEP)
+	w.u8(aps.DestEP)
+	w.u16(aps.Options)
+	w.u16(aps.GroupID)
+	w.u8(aps.APSSequence)
+	w.u8(radius)
+	w.u8(0) // message tag
+	w.u8(uint8(len(payload)))
+	w.bytes(payload)
+
+	params, err := c.command(ctx, FrameSendBroadcast, w.b)
+	if err != nil {
+		return 0, err
+	}
+	r := newBuf(params)
+	status := EmberStatus(r.u8())
+	seq := r.u8()
+	if r.err != nil {
+		return 0, r.err
+	}
+	if !status.OK() {
+		return 0, fmt.Errorf("ezsp: sendBroadcast to 0x%04X: %s", dest, status)
+	}
+	return seq, nil
+}
+
+// ZDOMgmtPermitJoining is the ZDO request that opens or closes joining on a
+// remote node.
+const ZDOMgmtPermitJoining uint16 = 0x0036
+
+// BroadcastPermitJoining asks every router in the mesh to open (or, with
+// zero, close) joining for the given number of seconds.
+//
+// permitJoining on its own opens only the coordinator. Every other router
+// keeps advertising "not accepting joins" in its beacons, and a joining
+// device only associates with a parent whose beacon says it may. So a device
+// that can hear a router but not the coordinator — a range extender, placed
+// at the edge of coverage because that is the point of it — sees a network
+// that is closed, and never even tries.
+func (c *Conn) BroadcastPermitJoining(ctx context.Context, tsn, seconds uint8) error {
+	aps := APSFrame{Profile: ProfileZDO, Cluster: ZDOMgmtPermitJoining}
+	// transactionSeq(1) permitDuration(1) tcSignificance(1)
+	_, err := c.SendBroadcast(ctx, BroadcastRouters, aps, 0, []byte{tsn, seconds, 0x01})
+	return err
+}
