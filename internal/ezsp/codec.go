@@ -3,6 +3,7 @@ package ezsp
 import (
 	"encoding/binary"
 	"fmt"
+	"strings"
 )
 
 // Zigbee is little-endian on the wire throughout, including IEEE addresses,
@@ -108,6 +109,25 @@ func (a EUI64) String() string {
 
 // IsZero reports whether the address is unset.
 func (a EUI64) IsZero() bool { return a == EUI64{} }
+
+// ParseEUI64 reads an address as people write it: sixteen hex digits, with or
+// without separators, most significant byte first.
+func ParseEUI64(s string) (EUI64, error) {
+	clean := strings.NewReplacer(":", "", "-", "", " ", "", ".", "").Replace(strings.TrimSpace(s))
+	clean = strings.TrimPrefix(strings.TrimPrefix(clean, "0x"), "0X")
+	var a EUI64
+	if len(clean) != 16 {
+		return a, fmt.Errorf("%q is not a 64-bit address (want 16 hex digits)", s)
+	}
+	for i := 0; i < 8; i++ {
+		var v byte
+		if _, err := fmt.Sscanf(clean[2*i:2*i+2], "%02X", &v); err != nil {
+			return a, fmt.Errorf("%q is not a 64-bit address: %v", s, err)
+		}
+		a[i] = v
+	}
+	return a, nil
+}
 
 // MarshalText renders the address for JSON output.
 func (a EUI64) MarshalText() ([]byte, error) { return []byte(a.String()), nil }

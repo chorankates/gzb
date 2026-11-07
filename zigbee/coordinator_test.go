@@ -103,6 +103,10 @@ func (f *fakeConnection) Request(ctx context.Context, dest uint16, aps ezsp.APSF
 	return ezsp.IncomingMessage{}, ctx.Err()
 }
 
+func (f *fakeConnection) BroadcastRequest(ctx context.Context, dest uint16, aps ezsp.APSFrame, _ uint8, payload []byte, match func(ezsp.IncomingMessage) bool) (ezsp.IncomingMessage, error) {
+	return f.Request(ctx, dest, aps, payload, match)
+}
+
 func (f *fakeConnection) AllowJoins(context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

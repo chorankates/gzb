@@ -91,6 +91,7 @@ type connection interface {
 	WatchJoins(int) (<-chan ezsp.JoinEvent, <-chan error, func())
 	SendUnicast(context.Context, uint16, ezsp.APSFrame, uint8, []byte) (uint8, error)
 	Request(context.Context, uint16, ezsp.APSFrame, []byte, func(ezsp.IncomingMessage) bool) (ezsp.IncomingMessage, error)
+	BroadcastRequest(context.Context, uint16, ezsp.APSFrame, uint8, []byte, func(ezsp.IncomingMessage) bool) (ezsp.IncomingMessage, error)
 	AllowJoins(context.Context) error
 	PermitJoining(context.Context, uint8) error
 	BroadcastPermitJoining(context.Context, uint8, uint8) error

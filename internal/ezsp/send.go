@@ -236,3 +236,29 @@ func (c *Conn) BroadcastPermitJoining(ctx context.Context, tsn, seconds uint8) e
 	_, err := c.SendBroadcast(ctx, BroadcastRouters, aps, 0, []byte{tsn, seconds, 0x01})
 	return err
 }
+
+// BroadcastRequest puts a question to every node dest names and returns the
+// first reply match accepts. It is how a device is reached when only its IEEE
+// address is known: the mesh carries the question and the device itself
+// answers, with no need to know which router it sits behind.
+func (c *Conn) BroadcastRequest(ctx context.Context, dest uint16, aps APSFrame, radius uint8, payload []byte, match func(IncomingMessage) bool) (IncomingMessage, error) {
+	replies, cancel := c.Subscribe(func(m Message) bool {
+		return m.Callback && m.ID == FrameIncomingMessage
+	}, 32)
+	defer cancel()
+
+	started := time.Now()
+	send := func() error {
+		_, err := c.SendBroadcast(ctx, dest, aps, radius, payload)
+		return err
+	}
+	msg, attempts, err := awaitReply(ctx, replies, ResendInterval, send, match)
+	if err == nil {
+		return msg, nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return IncomingMessage{}, fmt.Errorf("%w: no reply to broadcast 0x%04X on cluster 0x%04X after %d attempts over %s",
+			ErrTimeout, dest, aps.Cluster, attempts, time.Since(started).Round(time.Second))
+	}
+	return IncomingMessage{}, err
+}

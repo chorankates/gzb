@@ -326,3 +326,36 @@ func (r *cursor) u16() uint16 {
 	r.pos += 2
 	return v
 }
+
+// ClusterNetworkAddress is NWK_addr_req: "which network address does this IEEE
+// address have?" Broadcast, it is answered by the device it names.
+const ClusterNetworkAddress uint16 = 0x0000
+
+// NetworkAddressRequest builds NWK_addr_req for one device. ieee is in the
+// order it is written, most significant byte first; the wire wants the reverse.
+func NetworkAddressRequest(seq uint8, ieee [8]byte) []byte {
+	b := []byte{seq}
+	for i := 7; i >= 0; i-- {
+		b = append(b, ieee[i])
+	}
+	return append(b, 0x00, 0x00) // single device response, start index 0
+}
+
+// ParseNetworkAddress reads NWK_addr_rsp:
+//
+//	seq(1) status(1) ieee(8) nwkAddr(2) [numAssoc(1) startIndex(1) assoc...]
+//
+// The IEEE address comes back in written order, most significant byte first.
+func ParseNetworkAddress(payload []byte) (ieee [8]byte, addr uint16, status Status, err error) {
+	r := &cursor{b: payload}
+	r.u8()
+	status = Status(r.u8())
+	for i := 7; i >= 0; i-- {
+		ieee[i] = r.u8()
+	}
+	addr = r.u16()
+	if r.err != nil {
+		return [8]byte{}, 0, status, fmt.Errorf("zdo: NWK_addr_rsp: %w", r.err)
+	}
+	return ieee, addr, status, nil
+}
