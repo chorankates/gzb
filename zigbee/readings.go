@@ -140,6 +140,7 @@ func (c *Coordinator) handleIncoming(ctx context.Context, m ezsp.Message) ([]Rea
 			ClusterID:  msg.APS.Cluster,
 			Cluster:    zcl.ClusterName(msg.APS.Cluster),
 			ID:         frame.Command,
+			Sequence:   frame.Sequence,
 			Name:       zcl.ClusterCommandName(msg.APS.Cluster, frame.Command),
 			Payload:    append([]byte(nil), frame.Payload...),
 			LQI:        msg.LQI,

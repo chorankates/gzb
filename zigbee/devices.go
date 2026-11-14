@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/chorankates/gzb/internal/store"
+	"github.com/chorankates/gzb/internal/zdo"
 )
 
 // ErrNoDevice reports that nothing in the registry matched a query. Callers
@@ -189,8 +190,8 @@ func snapshotDevice(d *store.Device) Device {
 		Name:          d.Name,
 		Manufacturer:  d.Manufacturer,
 		Model:         d.Model,
-		NodeType:      d.NodeType,
-		PowerSource:   d.PowerSource,
+		NodeType:      nodeTypeOf(d),
+		PowerSource:   powerSourceOf(d),
 		FirstSeen:     d.FirstSeen,
 		LastSeen:      d.LastSeen,
 		Interviewed:   d.Interviewed,
@@ -209,4 +210,51 @@ func snapshotDevice(d *store.Device) Device {
 		}
 	}
 	return device
+}
+
+// A device describes how it is powered in two places, and they do not always
+// agree.
+//
+// The MAC capability byte is what it told the network when it joined: whether
+// it runs from the mains, and whether its receiver stays on. The network acts
+// on that byte -- a parent holds messages for a child that said it sleeps --
+// so a device that gets it wrong does not work, and devices get it right.
+// The power descriptor is an answer to a question nothing depends on, and
+// firmware treats it accordingly: Tuya's battery remotes, the TS0044 among
+// them, answer "mains" from a coin cell.
+//
+// The registry keeps both as the device gave them. What gzb says about the
+// device is reconciled here, on the way out, so a record written before this
+// existed is corrected without asking the device anything again.
+
+// powerSourceOf is how a device is powered, with the capability byte
+// overruling a power descriptor that contradicts it. The descriptor still
+// wins wherever it is the more specific of two answers that agree -- the byte
+// can say "battery" but only the descriptor can say "rechargeable".
+func powerSourceOf(d *store.Device) string {
+	if d.Capability == nil {
+		return d.PowerSource
+	}
+	mains := zdo.MACCapability(*d.Capability).Mains()
+	switch {
+	case d.PowerSource == "mains" && !mains:
+		return "battery"
+	case d.PowerSource == "" && mains:
+		return "mains"
+	case d.PowerSource == "" && !mains:
+		return "battery"
+	}
+	return d.PowerSource
+}
+
+// nodeTypeOf is the device's role, saying "sleepy" where the capability byte
+// does. A node descriptor has one word for every end device, so an interview
+// leaves a sleeping sensor recorded as a plain "end device"; the byte is what
+// says its receiver is off between transmissions.
+func nodeTypeOf(d *store.Device) string {
+	if d.Capability != nil && d.NodeType == zdo.TypeEndDevice.String() &&
+		zdo.MACCapability(*d.Capability).Sleepy() {
+		return "sleepy end device"
+	}
+	return d.NodeType
 }

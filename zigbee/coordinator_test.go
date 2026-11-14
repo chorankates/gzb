@@ -267,6 +267,9 @@ func TestReadingsHandsOverClusterCommands(t *testing.T) {
 		if len(cmd.Payload) != 1 || cmd.Payload[0] != 0x01 {
 			t.Errorf("payload = % X, want 01", cmd.Payload)
 		}
+		if cmd.Sequence != 0x17 {
+			t.Errorf("sequence = 0x%02X, want 0x17", cmd.Sequence)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for command")
 	}

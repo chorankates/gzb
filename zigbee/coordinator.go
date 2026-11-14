@@ -81,6 +81,11 @@ type Command struct {
 	Cluster   string `json:"cluster"`
 	// ID is the command byte, which only has meaning alongside the cluster.
 	ID uint8 `json:"command"`
+	// Sequence is the ZCL transaction sequence number the device gave the
+	// frame. A device that says the same thing twice to be sure of being
+	// heard may reuse it, which is the only way to tell that from a device
+	// that did the same thing twice.
+	Sequence uint8 `json:"sequence"`
 	// Name is the standard ZCL name for the command where gzb knows one.
 	Name string `json:"name"`
 	// ManufacturerCode is set when the frame was manufacturer-specific.

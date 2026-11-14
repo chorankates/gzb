@@ -228,3 +228,28 @@ func TestRegistryAPIIsSafeAlongsideReadings(t *testing.T) {
 		t.Errorf("unexpected shutdown error: %v", err)
 	}
 }
+
+// A Tuya TS0044 remote runs off a coin cell and answers "mains" to a power
+// descriptor request. Its capability byte, which the network depends on, says
+// battery and asleep, and that is what the device is reported as.
+func TestSnapshotBelievesTheCapabilityByteAboutPower(t *testing.T) {
+	battery, wall := uint8(0x80), uint8(0x8E)
+	cases := []struct {
+		name                string
+		device              store.Device
+		wantPower, wantType string
+	}{
+		{"descriptor contradicted", store.Device{NodeType: "end device", PowerSource: "mains", Capability: &battery}, "battery", "sleepy end device"},
+		{"descriptor more specific", store.Device{NodeType: "end device", PowerSource: "disposable battery", Capability: &battery}, "disposable battery", "sleepy end device"},
+		{"no descriptor", store.Device{NodeType: "end device", Capability: &battery}, "battery", "sleepy end device"},
+		{"mains and listening", store.Device{NodeType: "end device", PowerSource: "mains", Capability: &wall}, "mains", "end device"},
+		{"router", store.Device{NodeType: "router", PowerSource: "mains", Capability: &wall}, "mains", "router"},
+		{"nothing to check against", store.Device{NodeType: "end device", PowerSource: "mains"}, "mains", "end device"},
+	}
+	for _, tc := range cases {
+		got := snapshotDevice(&tc.device)
+		if got.PowerSource != tc.wantPower || got.NodeType != tc.wantType {
+			t.Errorf("%s: %q / %q, want %q / %q", tc.name, got.PowerSource, got.NodeType, tc.wantPower, tc.wantType)
+		}
+	}
+}
