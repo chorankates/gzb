@@ -126,6 +126,36 @@ func (c *Coordinator) handleIncoming(ctx context.Context, m ezsp.Message) ([]Rea
 		return nil, nil
 	}
 
+	// A cluster-specific frame is a device doing something rather than
+	// reporting something: a switch sends On the same way a hub does. It has
+	// no attributes to decode, and naming its command byte as though it were
+	// profile-wide would call a button press "read attributes".
+	if frame.Type == zcl.FrameClusterSpecific {
+		command := Command{
+			At:         now,
+			IEEE:       ieee,
+			DeviceName: name,
+			NodeID:     msg.Sender,
+			Endpoint:   msg.APS.SourceEP,
+			ClusterID:  msg.APS.Cluster,
+			Cluster:    zcl.ClusterName(msg.APS.Cluster),
+			ID:         frame.Command,
+			Name:       zcl.ClusterCommandName(msg.APS.Cluster, frame.Command),
+			Payload:    append([]byte(nil), frame.Payload...),
+			LQI:        msg.LQI,
+			RSSI:       msg.RSSI,
+		}
+		if frame.ManufacturerSpecific {
+			command.ManufacturerCode = frame.ManufacturerCode
+		}
+		if c.opts.OnCommand != nil {
+			c.opts.OnCommand(command)
+		} else {
+			c.unhandled(eventFor(ieee, name, msg, now, command.String()))
+		}
+		return nil, nil
+	}
+
 	attrs, err := frame.Attributes()
 	if err != nil {
 		c.unhandled(eventFor(ieee, name, msg, now, zcl.CommandName(frame.Command)))

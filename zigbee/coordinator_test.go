@@ -231,6 +231,78 @@ func TestReadingsDecodesAndEnrichesAttributeReport(t *testing.T) {
 	}
 }
 
+// A Tuya four-button switch says which button by the endpoint it sends from
+// and what kind of press in one payload byte, all on a command no
+// specification defines. None of that is a reading, and all of it has to
+// survive the trip.
+func TestReadingsHandsOverClusterCommands(t *testing.T) {
+	fake := newFakeConnection()
+	db := emptyStore(t)
+	device, _ := db.Observe("5C:3A:A2:FF:FE:43:62:61", 0x90CB, time.Now())
+	device.Name = "4 clicker"
+
+	commands := make(chan Command, 1)
+	events := make(chan Event, 1)
+	c := &Coordinator{conn: fake, db: db, opts: Options{
+		OnCommand:   func(cmd Command) { commands <- cmd },
+		OnUnhandled: func(ev Event) { events <- ev },
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	readings, _ := c.Readings(ctx)
+
+	msg := incomingMessage(zcl.ClusterOnOff, []byte{0x09, 0x17, 0xFD, 0x01})
+	msg.Params[5] = 3 // source endpoint: the third button
+	fake.msgs <- msg
+
+	select {
+	case cmd := <-commands:
+		if cmd.IEEE != device.IEEE || cmd.DeviceName != "4 clicker" {
+			t.Errorf("identity = %q/%q", cmd.IEEE, cmd.DeviceName)
+		}
+		if cmd.Endpoint != 3 || cmd.ClusterID != zcl.ClusterOnOff || cmd.ID != 0xFD {
+			t.Errorf("command = %+v, want 0xFD on on/off from endpoint 3", cmd)
+		}
+		if len(cmd.Payload) != 1 || cmd.Payload[0] != 0x01 {
+			t.Errorf("payload = % X, want 01", cmd.Payload)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for command")
+	}
+
+	select {
+	case r := <-readings:
+		t.Errorf("a command produced a reading: %+v", r)
+	case ev := <-events:
+		t.Errorf("a command taken by OnCommand was also reported unhandled: %+v", ev)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// Without OnCommand a command is still visible, and named for what it is.
+func TestReadingsReportsClusterCommandsAsUnhandled(t *testing.T) {
+	fake := newFakeConnection()
+	events := make(chan Event, 1)
+	c := &Coordinator{conn: fake, db: emptyStore(t), opts: Options{
+		OnUnhandled: func(ev Event) { events <- ev },
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c.Readings(ctx)
+	fake.msgs <- incomingMessage(zcl.ClusterOnOff, []byte{0x01, 0x17, 0x02})
+
+	select {
+	case ev := <-events:
+		if ev.Description != "toggle from endpoint 1" {
+			t.Errorf("description = %q, want %q", ev.Description, "toggle from endpoint 1")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for event")
+	}
+}
+
 func TestReadingsAllowsOnlyOneProtocolLoop(t *testing.T) {
 	fake := newFakeConnection()
 	c := &Coordinator{conn: fake, db: emptyStore(t)}

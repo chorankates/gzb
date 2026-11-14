@@ -52,6 +52,51 @@ type Options struct {
 	// OnUnhandled is called for incoming application frames that do not
 	// produce a Reading. It is primarily useful for diagnostic tools.
 	OnUnhandled func(Event)
+
+	// OnCommand is called for every cluster-specific command a device sends:
+	// a button pressed on a switch, an alarm raised by a sensor. These are
+	// not readings -- a press is something that happened, not a value the
+	// device holds -- so they arrive here rather than on the Readings
+	// channel. It is called from the Readings loop and should not block.
+	// When nil, commands are reported through OnUnhandled instead.
+	OnCommand func(Command)
+}
+
+// Command is one cluster-specific command received from a device.
+//
+// It is deliberately uninterpreted. What command 0xFD on the on/off cluster
+// means is a vendor's business, and which button sent it is a matter of the
+// endpoint it came from; an application that knows the device has everything
+// here it needs to say what happened.
+type Command struct {
+	At         time.Time `json:"at"`
+	IEEE       string    `json:"ieee,omitempty"`
+	DeviceName string    `json:"device_name,omitempty"`
+	NodeID     uint16    `json:"node_id"`
+	// Endpoint is the endpoint on the device that sent the command. A switch
+	// with several buttons usually gives each its own, so this is what tells
+	// them apart.
+	Endpoint  uint8  `json:"endpoint"`
+	ClusterID uint16 `json:"cluster_id"`
+	Cluster   string `json:"cluster"`
+	// ID is the command byte, which only has meaning alongside the cluster.
+	ID uint8 `json:"command"`
+	// Name is the standard ZCL name for the command where gzb knows one.
+	Name string `json:"name"`
+	// ManufacturerCode is set when the frame was manufacturer-specific.
+	ManufacturerCode uint16 `json:"manufacturer_code,omitempty"`
+	Payload          []byte `json:"payload,omitempty"`
+	LQI              uint8  `json:"lqi"`
+	RSSI             int8   `json:"rssi"`
+}
+
+// String renders a command for a log or a diagnostic tool.
+func (c Command) String() string {
+	s := fmt.Sprintf("%s from endpoint %d", c.Name, c.Endpoint)
+	if len(c.Payload) > 0 {
+		s += fmt.Sprintf(" [% X]", c.Payload)
+	}
+	return s
 }
 
 // Event describes an incoming frame that did not produce a physical reading.
